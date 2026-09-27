@@ -1,0 +1,41 @@
+{{define "edit.html"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>edit {{.Link.Name}} · shortlink</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.25rem; }
+  h1 a { color: inherit; text-decoration: none; }
+  form { margin: .5rem 0; display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  input[type=url] { padding: .4rem .5rem; font-size: 1rem; border: 1px solid #999; border-radius: 4px; background: transparent; color: inherit; width: 28rem; max-width: 100%; }
+  button { padding: .4rem .8rem; font-size: .95rem; border: 1px solid #999; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
+  button:hover { background: rgba(128,128,128,.15); }
+  .meta { color: #777; font-size: .875rem; }
+  .msg { padding: .5rem .75rem; border-radius: 4px; margin: .75rem 0; }
+  .msg.ok { background: rgba(0,128,0,.15); }
+  .msg.err { background: rgba(200,0,0,.15); }
+  .name { font-family: ui-monospace, monospace; font-size: 1.1rem; }
+</style>
+</head>
+<body>
+<h1><a href="/">shortlink</a> / edit</h1>
+{{if .Msg}}<div class="msg {{.MsgKind}}">{{.Msg}}</div>{{end}}
+<p class="name">/{{.Link.Name}}</p>
+<p class="meta">owned by {{.Link.Owner}} · {{.Link.Clicks}} clicks · created {{.Link.CreatedAt.Format "2006-01-02 15:04"}} UTC</p>
+
+<form method="post" action="/-/save">
+  <input type="hidden" name="name" value="{{.Link.Name}}">
+  <input type="url" name="url" value="{{.Link.URL}}" required>
+  <button type="submit">Save</button>
+</form>
+<form method="post" action="/-/delete">
+  <input type="hidden" name="name" value="{{.Link.Name}}">
+  <button type="submit">Delete</button>
+</form>
+<p><a href="/">← back</a></p>
+</body>
+</html>
+{{end}}

@@ -1,0 +1,80 @@
+{{define "index.html"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shortlink</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.5rem; margin-bottom: .25rem; }
+  h1 a { color: inherit; text-decoration: none; }
+  .sub { color: #777; font-size: .875rem; margin-top: 0; }
+  form { margin: .5rem 0; }
+  input[type=text], input[type=url] { padding: .4rem .5rem; font-size: 1rem; border: 1px solid #999; border-radius: 4px; background: transparent; color: inherit; }
+  input[name=name] { width: 14rem; }
+  input[name=url] { width: 24rem; max-width: 100%; }
+  button { padding: .4rem .8rem; font-size: .95rem; border: 1px solid #999; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
+  button:hover { background: rgba(128,128,128,.15); }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .95rem; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid rgba(128,128,128,.35); vertical-align: top; }
+  th { font-weight: 600; }
+  td.url { word-break: break-all; }
+  .msg { padding: .5rem .75rem; border-radius: 4px; margin: .75rem 0; }
+  .msg.ok { background: rgba(0,128,0,.15); }
+  .msg.err { background: rgba(200,0,0,.15); }
+  .actions { white-space: nowrap; }
+  .actions form { display: inline; margin: 0 .25rem 0 0; }
+  .tag { font-size: .75rem; padding: .1rem .4rem; border: 1px solid #999; border-radius: 999px; }
+  .create, .search { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  .dim { color: #777; }
+</style>
+</head>
+<body>
+<h1><a href="/">shortlink</a></h1>
+<p class="sub">private short links · signed in as <strong>{{if .Identity.ID}}{{.Identity.ID}}{{else}}anonymous{{end}}</strong>{{if .Identity.IsAdmin}} <span class="tag">admin</span>{{end}}</p>
+
+{{if .Msg}}<div class="msg {{.MsgKind}}">{{.Msg}}</div>{{end}}
+
+{{if .ShowForm}}
+<form class="create" method="post" action="/-/save">
+  <input type="text" name="name" placeholder="name (e.g. docs/go)" value="{{.FormName}}" required pattern="[a-z0-9][a-z0-9\-._/]*" maxlength="100">
+  <input type="url" name="url" placeholder="https://example.com/page" value="{{.FormURL}}" required>
+  <button type="submit">Create</button>
+</form>
+
+<form class="search" method="get" action="/">
+  <input type="text" name="q" placeholder="search name or URL" value="{{.Query}}">
+  <button type="submit">Search</button>
+  {{if .Query}}<a href="/">clear</a>{{end}}
+</form>
+{{end}}
+
+<table>
+  <thead>
+    <tr><th>Name</th><th>URL</th><th>Owner</th><th>Updated</th><th>Clicks</th><th></th></tr>
+  </thead>
+  <tbody>
+  {{range .Links}}
+    <tr>
+      <td><a href="/{{.Name}}">{{.Name}}</a></td>
+      <td class="url">{{.URL}}</td>
+      <td>{{.Owner}}</td>
+      <td class="dim">{{.UpdatedAt.Format "2006-01-02 15:04"}}</td>
+      <td>{{.Clicks}}</td>
+      <td class="actions">
+        <a href="/-/edit/{{.Name}}">edit</a>
+        <form method="post" action="/-/delete">
+          <input type="hidden" name="name" value="{{.Name}}">
+          <button type="submit">delete</button>
+        </form>
+      </td>
+    </tr>
+  {{else}}
+    <tr><td colspan="6" class="dim">No links yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</body>
+</html>
+{{end}}
