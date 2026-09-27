@@ -1,0 +1,28 @@
+# Databases and WAL sidecars
+shortlink.db
+shortlink.db-wal
+shortlink.db-shm
+*.db
+
+# Secrets: tailcat node key + preshared key
+shortlink-tailcat.key
+*.key
+
+# Tailscale/tsnet node state
+shortlink-tsnet/
+.tsnet/
+tailscaled.state
+*.state
+
+# Build output
+/shortlink
+/cmd/shortlink/shortlink
+dist/
+
+# Logs / editor / OS cruft
+nohup.out
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp
