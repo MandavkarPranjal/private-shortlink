@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +86,31 @@ func portOf(addr string) string {
 		return ""
 	}
 	return p
+}
+
+func TestListenError(t *testing.T) {
+	perm := fmt.Errorf("bind: %w", os.ErrPermission)
+
+	err := listenError("100.64.0.1:80", perm)
+	for _, want := range []string{
+		"100.64.0.1:80", "permission denied", "CAP_NET_BIND_SERVICE", "-listen 100.64.0.1:8080",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("listenError = %q, missing %q", err, want)
+		}
+	}
+
+	if err := listenError(":80", perm); !strings.Contains(err.Error(), "-listen :8080") {
+		t.Errorf("host-less addr hint: %v", err)
+	}
+	if err := listenError("100.64.0.1:8080", perm); strings.Contains(err.Error(), "CAP_NET_BIND_SERVICE") {
+		t.Errorf("high port should not get the hint: %v", err)
+	}
+	other := errors.New("address already in use")
+	err = listenError("100.64.0.1:80", other)
+	if !strings.Contains(err.Error(), "address already in use") || strings.Contains(err.Error(), "CAP_NET_BIND_SERVICE") {
+		t.Errorf("non-permission error: %v", err)
+	}
 }
 
 func TestIsAdminCap(t *testing.T) {

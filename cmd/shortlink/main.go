@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 	"private-shortlink/internal/web"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 type config struct {
 	mode     string
@@ -28,6 +29,11 @@ type config struct {
 	stateDir string
 	keyFile  string
 	open     bool
+
+	netbirdAPI        string
+	netbirdToken      string
+	netbirdIface      string
+	netbirdAdminGroup string
 }
 
 // service is a mode-specific listener plus the identity function it implies.
@@ -41,13 +47,17 @@ type service struct {
 func main() {
 	cfg := config{}
 	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.StringVar(&cfg.mode, "mode", "tailnet", "service mode: tailnet, tailcat, or local")
-	flag.StringVar(&cfg.listen, "listen", "", "listen address (default \":80\" for tailnet/tailcat, \":8080\" for local)")
+	flag.StringVar(&cfg.mode, "mode", "tailnet", "service mode: tailnet, tailcat, netbird, or local")
+	flag.StringVar(&cfg.listen, "listen", "", "listen address (default \":80\" for tailnet/tailcat/netbird, \":8080\" for local)")
 	flag.StringVar(&cfg.dbPath, "db", "shortlink.db", "path to the SQLite database")
 	flag.StringVar(&cfg.hostname, "hostname", "go", "tailnet: MagicDNS hostname to advertise (default \"go\")")
 	flag.StringVar(&cfg.authKey, "ts-authkey", "", "tailnet: node auth key (default $TS_AUTHKEY; unused after first login)")
 	flag.StringVar(&cfg.stateDir, "state-dir", "", "tailnet: tsnet state directory (default under the user config dir)")
 	flag.StringVar(&cfg.keyFile, "key-file", "shortlink-tailcat.key", "tailcat: persistent node key file (keeps the tc... address stable)")
+	flag.StringVar(&cfg.netbirdAPI, "netbird-api", "https://api.netbird.io", "netbird: management API base URL")
+	flag.StringVar(&cfg.netbirdToken, "netbird-token", "", "netbird: management API token (default $NETBIRD_API_TOKEN)")
+	flag.StringVar(&cfg.netbirdIface, "netbird-iface", "wt0", "netbird: WireGuard interface to bind")
+	flag.StringVar(&cfg.netbirdAdminGroup, "netbird-admin-group", "shortlink-admin", "netbird: peer group granted admin (empty for none)")
 	flag.BoolVar(&cfg.open, "open", false, "disable ownership checks; anyone may edit any link")
 	flag.Parse()
 
@@ -66,9 +76,9 @@ func main() {
 
 func run(ctx context.Context, cfg config) error {
 	switch cfg.mode {
-	case "tailnet", "tailcat", "local":
+	case "tailnet", "tailcat", "netbird", "local":
 	default:
-		return fmt.Errorf("unknown -mode %q (want tailnet, tailcat, or local)", cfg.mode)
+		return fmt.Errorf("unknown -mode %q (want tailnet, tailcat, netbird, or local)", cfg.mode)
 	}
 
 	st, err := store.Open(cfg.dbPath)
@@ -83,6 +93,8 @@ func run(ctx context.Context, cfg config) error {
 		svc, err = setupLocal(cfg)
 	case "tailcat":
 		svc, err = setupTailcat(ctx, cfg)
+	case "netbird":
+		svc, err = setupNetbird(ctx, cfg)
 	case "tailnet":
 		svc, err = setupTailnet(ctx, cfg)
 	}
@@ -125,6 +137,26 @@ func run(ctx context.Context, cfg config) error {
 	return nil
 }
 
+// listenError explains the most common bind failure: ports below 1024 need
+// extra privileges. (tsnet and tailcat never hit this — they never bind an
+// OS port.)
+func listenError(addr string, err error) error {
+	if !errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	host, port, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	p, convErr := strconv.Atoi(port)
+	if convErr != nil || p >= 1024 {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	return fmt.Errorf("listen %s: %w (ports below 1024 need root or CAP_NET_BIND_SERVICE; "+
+		"try `sudo setcap cap_net_bind_service=+ep shortlink` or -listen %s)",
+		addr, err, net.JoinHostPort(host, "8080"))
+}
+
 // setupLocal binds a plain TCP listener (development / single-host mode).
 func setupLocal(cfg config) (*service, error) {
 	addr := cfg.listen
@@ -133,7 +165,7 @@ func setupLocal(cfg config) (*service, error) {
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("listen %s: %w", addr, err)
+		return nil, listenError(addr, err)
 	}
 	_, port, err := net.SplitHostPort(ln.Addr().String())
 	if err == nil && (port != "" && port != "0") {

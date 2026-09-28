@@ -45,13 +45,9 @@ func setupTailcat(ctx context.Context, cfg config) (*service, error) {
 	return &service{
 		ln: ln,
 		identity: func(r *http.Request) web.Identity {
-			host, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				host = r.RemoteAddr
-			}
 			// The host is the client's synthetic tailcat address, derived
 			// from its node key, so it is stable across sessions.
-			return web.Identity{ID: host}
+			return web.Identity{ID: hostOf(r.RemoteAddr)}
 		},
 		closeBackend: func() error { return s.Close() },
 		banner: []string{

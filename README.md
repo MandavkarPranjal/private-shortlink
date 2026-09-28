@@ -8,11 +8,12 @@ are reachable only from networks you expose it to:
 |-----------|----------------------------------------|-----------------------------|
 | `tailnet` | Embedded Tailscale node (tsnet, port 80) | Your tailnet only (default) |
 | `tailcat` | [tailcat](https://github.com/tailscale/tailcat) `tc…` address | Anyone you share the address with |
+| `netbird` | Plain TCP on your [NetBird](https://netbird.io) interface | Your NetBird network only |
 | `local`   | Plain TCP listener                     | Local/dev use               |
 
 Features: redirects with click counts, a server-rendered web UI (browse,
 search, create, edit, delete), a JSON API, owner-based permissions with
-tailnet-admin override, and JSON-lines backup export.
+admin override, and JSON-lines backup export.
 
 ## Build
 
@@ -94,6 +95,44 @@ identities: each client is identified by its stable synthetic tailcat address
 address stable across restarts (both the node key and the preshared key are
 required).
 
+### netbird mode
+
+Serves on your NetBird network: the server binds this host's NetBird WireGuard
+interface (default `wt0`, port 80) with a plain TCP listener, so it is only
+reachable through the mesh, and resolves callers through the NetBird
+management API.
+
+```sh
+export NETBIRD_API_TOKEN=nbp_...    # dashboard: Users → Me → API tokens
+./shortlink -mode netbird
+```
+
+The token only needs read access to peers and users. Self-hosted NetBird?
+Point `-netbird-api` at your management server (e.g.
+`http://localhost:33071`). If the WireGuard interface has another name
+(`netbird0`, `utun…`), set `-netbird-iface`. Binding port 80 needs root or
+`CAP_NET_BIND_SERVICE` (`sudo setcap cap_net_bind_service=+ep shortlink` after
+each build); otherwise run `-listen <netbird-ip>:8080` — keep the mesh IP in
+the address, a bare `:8080` would also expose the service on your LAN.
+
+On startup it prints something like:
+
+```
+Shortlink is on your NetBird network at http://go.netbird.cloud/
+  Identity: caller's NetBird user email via https://api.netbird.io
+  Bound to 100.64.0.1:80 on interface "wt0" (-listen to override)
+  Admins: peers in the "shortlink-admin" NetBird group
+```
+
+Requests are identified by the caller's NetBird **user email**
+(e.g. `alice@example.com`), so a person owns their links no matter which
+device they use. The peer/IP directory is refreshed from the API every
+minute; callers unknown to it fall back to their raw mesh IP.
+
+**Admin grants.** Peers in the `-netbird-admin-group` group (default
+`shortlink-admin`, exact name match, empty means nobody) are app admins.
+Create the group in the NetBird dashboard and put your admin peers in it.
+
 ### local mode
 
 Plain HTTP on localhost, for development or when something else fronts it:
@@ -145,15 +184,19 @@ curl http://go/-/api/blog
 ## Flags
 
 ```
--mode string       tailnet, tailcat, or local (default "tailnet")
--listen string     listen address (default ":80" tailnet/tailcat, ":8080" local)
--db string         SQLite database path (default "shortlink.db")
--hostname string   tailnet: MagicDNS hostname to advertise (default "go")
--ts-authkey string tailnet: auth key (default $TS_AUTHKEY; unused after first login)
--state-dir string  tailnet: tsnet state directory (default under user config dir)
--key-file string   tailcat: persistent node key file (default "shortlink-tailcat.key")
--open              disable ownership checks (ownership still recorded)
--version           print version and exit
+-mode string        tailnet, tailcat, netbird, or local (default "tailnet")
+-listen string      listen address (default ":80" tailnet/tailcat/netbird, ":8080" local)
+-db string          SQLite database path (default "shortlink.db")
+-hostname string    tailnet: MagicDNS hostname to advertise (default "go")
+-ts-authkey string  tailnet: auth key (default $TS_AUTHKEY; unused after first login)
+-state-dir string   tailnet: tsnet state directory (default under user config dir)
+-key-file string    tailcat: persistent node key file (default "shortlink-tailcat.key")
+-netbird-api string netbird: management API base URL (default "https://api.netbird.io")
+-netbird-token string  netbird: management API token (default $NETBIRD_API_TOKEN)
+-netbird-iface string  netbird: WireGuard interface to bind (default "wt0")
+-netbird-admin-group string  netbird: peer group granted admin (default "shortlink-admin")
+-open               disable ownership checks (ownership still recorded)
+-version            print version and exit
 ```
 
 ## Data

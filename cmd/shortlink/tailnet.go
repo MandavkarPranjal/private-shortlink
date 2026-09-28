@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -99,11 +98,7 @@ func whoIsIdentity(lc *local.Client) web.IdentityFunc {
 	return func(r *http.Request) web.Identity {
 		resp, err := lc.WhoIs(r.Context(), r.RemoteAddr)
 		if err != nil || resp == nil || resp.UserProfile == nil {
-			host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
-			if splitErr != nil {
-				host = r.RemoteAddr
-			}
-			return web.Identity{ID: host}
+			return web.Identity{ID: hostOf(r.RemoteAddr)}
 		}
 		id := resp.UserProfile.LoginName
 		if id == "" {
