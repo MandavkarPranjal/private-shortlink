@@ -17,11 +17,25 @@ admin override, and JSON-lines backup export.
 
 ## Build
 
+Everything goes through [mise](https://mise.jdx.dev): the Go toolchain and the
+linters are pinned in `.mise.toml`, and `CGO_ENABLED=0` is set for you.
+
 ```sh
-CGO_ENABLED=0 go build -o shortlink ./cmd/shortlink
+mise trust          # once, after cloning: allow .mise.toml
+mise install        # install the pinned Go/golangci-lint/staticcheck
+mise run build      # -> ./shortlink
 ```
 
-No cgo, no system dependencies (the SQLite driver is pure Go).
+No cgo, no system dependencies (the SQLite driver is pure Go). `mise run` alone
+lists every task; `mise tasks info <name>` describes one.
+
+Secrets you don't want in your shell history can live in a `.env` file (mise
+loads it automatically, and it is gitignored):
+
+```sh
+TS_AUTHKEY=tskey-auth-...
+NETBIRD_API_TOKEN=nbp_...
+```
 
 ## Run
 
@@ -208,9 +222,15 @@ database file while stopped.
 ## Development
 
 ```sh
-go test ./...            # unit + handler tests; tailcat e2e relays through DERP
-go test -short ./...     # skip the network e2e test
-go vet ./...
+mise run fmt        # gofmt in place
+mise run lint       # staticcheck + golangci-lint
+mise run vet        # go vet
+mise run test       # unit + handler tests; tailcat e2e relays through DERP
+mise run test:short # skip the network e2e test
+mise run ci         # fmt:check, vet, lint, test
+mise run serve      # local mode on http://127.0.0.1:8080/
+mise run run -- -mode local -listen 127.0.0.1:8080   # flags pass through
 ```
 
-Run locally with `-mode local` and open http://127.0.0.1:8080/.
+Plain `go build` / `go test` still work if Go is on your PATH; mise just pins the
+versions so a teammate and CI get the same toolchain.

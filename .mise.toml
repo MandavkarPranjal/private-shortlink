@@ -1,0 +1,73 @@
+[tools]
+go = "1.27.1"
+golangci-lint = "2.13.2"
+staticcheck = "2026.2.1"
+
+[env]
+CGO_ENABLED = "0"
+
+[tasks.default]
+description = "List the available tasks"
+run = "mise tasks ls"
+
+[tasks.build]
+description = "Build ./shortlink (static, no cgo)"
+run = "go build -o shortlink ./cmd/shortlink"
+sources = ["go.mod", "go.sum", "doc.go", "cmd/**/*.go", "internal/**/*.go", ".mise.toml"]
+outputs = ["shortlink"]
+
+[tasks.run]
+description = "Run from source; args pass through: mise run run -- -mode local"
+run = "go run ./cmd/shortlink"
+
+[tasks.serve]
+description = "Run in local mode on 127.0.0.1:8080"
+run = "go run ./cmd/shortlink -mode local -listen 127.0.0.1:8080"
+
+[tasks.test]
+description = "go test ./... (tailcat e2e relays through DERP)"
+run = "go test ./..."
+
+[tasks."test:short"]
+description = "go test -short ./... (skips the network e2e test)"
+run = "go test -short ./..."
+
+[tasks.vet]
+description = "go vet ./..."
+run = "go vet ./..."
+
+[tasks.fmt]
+description = "gofmt the tree in place"
+run = "gofmt -w ."
+
+[tasks."fmt:check"]
+description = "Check formatting; lists unformatted files, writes nothing"
+run = "gofmt -l ."
+
+[tasks.lint]
+description = "staticcheck + golangci-lint"
+run = [
+  "staticcheck ./...",
+  "golangci-lint run",
+]
+
+[tasks.tidy]
+description = "go mod tidy"
+run = "go mod tidy"
+
+[tasks.ci]
+description = "fmt:check, vet, lint, test"
+run = [
+  { task = "fmt:check" },
+  { task = "vet" },
+  { task = "lint" },
+  { task = "test" },
+]
+
+[tasks.clean]
+description = "Remove build output"
+run = "rm -f shortlink"
+
+[tasks.check]
+description = "Show the toolchain mise resolved for this project"
+run = "mise current && go version"

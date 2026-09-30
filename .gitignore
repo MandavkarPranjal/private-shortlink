@@ -8,6 +8,10 @@ shortlink.db-shm
 shortlink-tailcat.key
 *.key
 
+# Secrets loaded by mise (TS_AUTHKEY, NETBIRD_API_TOKEN, ...)
+.env
+.env.local
+
 # Tailscale/tsnet node state
 shortlink-tsnet/
 .tsnet/

@@ -102,7 +102,7 @@ func run(ctx context.Context, cfg config) error {
 		return err
 	}
 	if svc.closeBackend != nil {
-		defer svc.closeBackend()
+		defer func() { _ = svc.closeBackend() }()
 	}
 
 	h, err := web.New(web.Config{Store: st, Identity: svc.identity, Open: cfg.open})

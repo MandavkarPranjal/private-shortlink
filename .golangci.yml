@@ -1,0 +1,17 @@
+version: "2"
+
+linters:
+  default: standard
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Test helpers close stores/servers without checking errors.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - staticcheck
