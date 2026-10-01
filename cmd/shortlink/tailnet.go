@@ -15,7 +15,7 @@ import (
 	"tailscale.com/tailcfg/peercap"
 	"tailscale.com/tsnet"
 
-	"private-shortlink/internal/web"
+	"github.com/mandavkarpranjal/private-shortlink/internal/web"
 )
 
 // adminCap is the tailcfg capability that grants admin rights on this app.

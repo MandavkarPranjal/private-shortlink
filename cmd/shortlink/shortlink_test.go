@@ -19,8 +19,8 @@ import (
 	"github.com/tailscale/tailcat"
 	"tailscale.com/tailcfg"
 
-	"private-shortlink/internal/store"
-	"private-shortlink/internal/web"
+	"github.com/mandavkarpranjal/private-shortlink/internal/store"
+	"github.com/mandavkarpranjal/private-shortlink/internal/web"
 )
 
 func TestLoadOrCreateTailcatKeys(t *testing.T) {

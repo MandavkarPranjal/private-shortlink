@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"private-shortlink/internal/store"
-	"private-shortlink/internal/web"
+	"github.com/mandavkarpranjal/private-shortlink/internal/store"
+	"github.com/mandavkarpranjal/private-shortlink/internal/web"
 )
 
 const version = "0.2.0"

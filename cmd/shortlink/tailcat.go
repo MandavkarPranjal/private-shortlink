@@ -13,7 +13,7 @@ import (
 	"github.com/tailscale/tailcat"
 	"tailscale.com/types/key"
 
-	"private-shortlink/internal/web"
+	"github.com/mandavkarpranjal/private-shortlink/internal/web"
 )
 
 // setupTailcat serves over a tailcat address: a Tailscale data plane without

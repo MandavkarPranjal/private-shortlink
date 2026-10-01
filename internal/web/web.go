@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strings"
 
-	"private-shortlink/internal/store"
+	"github.com/mandavkarpranjal/private-shortlink/internal/store"
 )
 
 //go:embed templates

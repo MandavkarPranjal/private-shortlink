@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"private-shortlink/internal/store"
+	"github.com/mandavkarpranjal/private-shortlink/internal/store"
 )
 
 func newTestHandler(t *testing.T, identity IdentityFunc, open bool) (*Handler, *store.Store) {

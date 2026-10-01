@@ -1,4 +1,4 @@
-module private-shortlink
+module github.com/mandavkarpranjal/private-shortlink
 
 go 1.27.1
 

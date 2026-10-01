@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"private-shortlink/internal/web"
+	"github.com/mandavkarpranjal/private-shortlink/internal/web"
 )
 
 // netbirdRefresh is how often identities are reloaded from the management API.
