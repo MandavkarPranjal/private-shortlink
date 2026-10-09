@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,7 +46,7 @@ func setupTailnet(ctx context.Context, cfg config) (*service, error) {
 		Dir:      dir,
 		Hostname: cfg.hostname,
 		AuthKey:  authKey,
-		UserLogf: log.Printf,
+		UserLogf: prefixedLogf("tsnet"),
 	}
 
 	// Up logs in (or prints an auth URL) and waits until the node is running.

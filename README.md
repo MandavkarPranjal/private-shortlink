@@ -13,7 +13,8 @@ are reachable only from networks you expose it to:
 
 Features: redirects with click counts, a server-rendered web UI (browse,
 search, create, edit, delete), a JSON API, owner-based permissions with
-admin override, and JSON-lines backup export.
+admin override, JSON-lines backup export, structured logs, and systemd/Docker
+deployment files.
 
 ## Build
 
@@ -27,7 +28,12 @@ mise run build      # -> ./shortlink
 ```
 
 No cgo, no system dependencies (the SQLite driver is pure Go). `mise run` alone
-lists every task; `mise tasks info <name>` describes one.
+lists every task; `mise tasks info <name>` describes one. The binary reports the
+git revision it was built from, so a deployed build is traceable:
+
+```sh
+./shortlink -version          # v0.2.0+a1b2c3d   (+…-dirty if uncommitted)
+```
 
 Secrets you don't want in your shell history can live in a `.env` file (mise
 loads it automatically, and it is gitignored):
@@ -210,8 +216,100 @@ curl http://go/-/api/blog
 -netbird-iface string  netbird: WireGuard interface to bind (default "wt0")
 -netbird-admin-group string  netbird: peer group granted admin (default "shortlink-admin")
 -open               disable ownership checks (ownership still recorded)
+-log-level string   log level: debug, info, warn, error (default "info")
+-log-format string  log format: text or json (default "text")
 -version            print version and exit
 ```
+
+Every flag also reads a `SHORTLINK_<FLAG>` environment variable, so a systemd
+`EnvironmentFile`, a `.env` file or a container environment can configure the
+service without a long command line: `-log-level` reads `SHORTLINK_LOG_LEVEL`,
+`-db` reads `SHORTLINK_DB`, `-netbird-api` reads `SHORTLINK_NETBIRD_API`. A
+flag given on the command line always wins. `TS_AUTHKEY` and
+`NETBIRD_API_TOKEN` keep their existing names.
+
+## Logging
+
+Logs are structured (`log/slog`) and go to stderr, ready for the journal or a
+shipper:
+
+```sh
+./shortlink -mode local -log-format json -log-level debug
+```
+
+One line per request, with the resolved identity:
+
+```
+level=WARN msg=request method=GET path=/-/edit/blog status=403 bytes=29 duration=142µs who=bob
+```
+
+Levels are chosen so that `-log-level info` shows only what needs attention:
+4xx is `WARN`, 5xx is `ERROR`, and successful requests and redirects are
+`DEBUG` — every click on a link is a redirect, so logging those at info would
+bury the rest. `debug` also surfaces tsnet/tailcat chatter.
+
+## Deployment
+
+### systemd
+
+`deploy/shortlink.service` runs the binary as an unprivileged `shortlink` user
+with `StateDirectory=shortlink`, a locked-down capability set, and the standard
+hardening directives. Per-mode capabilities are documented in the unit; the
+short version is that tailnet mode needs `CAP_NET_ADMIN` (tsnet creates a TUN
+device) and a port below 1024 needs `CAP_NET_BIND_SERVICE`.
+
+```sh
+# build and install
+mise run build
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin shortlink
+sudo install -m 0755 shortlink /usr/local/bin/shortlink
+
+# configuration (secrets live here)
+sudo install -d -m 0750 -o shortlink -g shortlink /etc/shortlink
+sudo install -m 0600 -o shortlink -g shortlink \
+  deploy/shortlink.env.example /etc/shortlink/shortlink.env
+sudo $EDITOR /etc/shortlink/shortlink.env
+
+sudo install -m 0644 deploy/shortlink.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now shortlink
+journalctl -u shortlink -f
+```
+
+### Docker
+
+The image is multi-stage and ends on `distroless/static`: a fully static
+binary, no shell, no package manager. It runs as uid 65532 and keeps state in
+two volumes, `/data` (the database) and `/config` (tsnet state, tailcat key):
+
+```sh
+docker build -t shortlink:local .
+docker run -d --name shortlink \
+  -p 8080:8080 \
+  -v shortlink-data:/data -v shortlink-config:/config \
+  shortlink:local
+```
+
+The default command is local mode on port 8080. For the mesh modes you need
+host networking and a TUN device, so override the command:
+
+```sh
+# tailnet: tsnet creates a TUN device, so it needs NET_ADMIN
+docker run -d --name shortlink \
+  --network host --device /dev/net/tun --cap-add NET_ADMIN \
+  -e TS_AUTHKEY=tskey-auth-... \
+  -v shortlink-config:/config \
+  shortlink:local -mode tailnet -state-dir /config/shortlink-tsnet
+
+# netbird: binds the mesh interface, which needs the host network namespace
+docker run -d --name shortlink \
+  --network host --cap-add NET_BIND_SERVICE \
+  -e NETBIRD_API_TOKEN=nbp_... \
+  -v shortlink-data:/data \
+  shortlink:local -mode netbird
+```
+
+`mise run docker:build` stamps the version and revision from git.
 
 ## Data
 

@@ -1,0 +1,30 @@
+# Build context: only the Go sources are needed. Copying the rest would bust
+# the dependency layer's cache whenever a local build touches an ignored file.
+.git
+.github
+.mise.toml
+.env
+.env.*
+mise.toml
+
+# Local state and secrets — must never land in an image layer.
+shortlink.db
+shortlink.db-wal
+shortlink.db-shm
+*.db
+*.key
+shortlink-tsnet/
+.tsnet/
+
+# Build output and editor cruft
+/shortlink
+/cmd/shortlink/shortlink
+dist/
+*.log
+nohup.out
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# The Dockerfile and .dockerignore themselves must stay in the context.

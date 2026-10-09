@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -245,7 +245,8 @@ func (d *netbirdDirectory) keepFresh(ctx context.Context, stop <-chan struct{}) 
 			return
 		case <-t.C:
 			if err := d.refresh(ctx); err != nil {
-				log.Printf("netbird: identity refresh failed (keeping previous): %v", err)
+				slog.Default().Warn("netbird: identity refresh failed, keeping previous identities",
+					slog.String("err", err.Error()))
 			}
 		}
 	}
