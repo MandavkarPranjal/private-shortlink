@@ -11,10 +11,19 @@ description = "List the available tasks"
 run = "mise tasks ls"
 
 [tasks.build]
-description = "Build ./shortlink (static, no cgo)"
-run = "go build -o shortlink ./cmd/shortlink"
+description = "Build ./shortlink (static, no cgo), stamping the git revision"
+run = "go build -trimpath -ldflags \"-s -w -X main.version=$(mise tasks run _version)\" -o shortlink ./cmd/shortlink"
 sources = ["go.mod", "go.sum", "doc.go", "cmd/**/*.go", "internal/**/*.go", ".mise.toml"]
 outputs = ["shortlink"]
+
+[tasks._version]
+description = "Describe the current tree: nearest tag, or short commit"
+hide = true
+run = "git describe --tags --always 2>/dev/null || echo dev"
+
+[tasks."docker:build"]
+description = "Build the container image, stamping the git revision"
+run = "docker build -t shortlink:local --build-arg VERSION=$(mise tasks run _version) ."
 
 [tasks.run]
 description = "Run from source; args pass through: mise run run -- -mode local"
@@ -67,6 +76,10 @@ run = [
 [tasks.clean]
 description = "Remove build output"
 run = "rm -f shortlink"
+
+[tasks.install]
+description = "Install ./shortlink to PREFIX/bin (default /usr/local) for the systemd unit"
+run = "install -d -m 0755 ${PREFIX:-/usr/local}/bin && install -m 0755 shortlink ${PREFIX:-/usr/local}/bin/shortlink"
 
 [tasks.check]
 description = "Show the toolchain mise resolved for this project"

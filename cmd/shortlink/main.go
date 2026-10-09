@@ -6,11 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,7 +21,10 @@ import (
 	"github.com/mandavkarpranjal/private-shortlink/internal/web"
 )
 
-const version = "0.2.0"
+// version is overridden at build time with
+// -ldflags "-X main.version=$(git describe --tags --always)". It is a var, not
+// a const, so the linker can replace it.
+var version = "0.2.0"
 
 type config struct {
 	mode     string
@@ -45,32 +51,174 @@ type service struct {
 }
 
 func main() {
-	cfg := config{}
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.StringVar(&cfg.mode, "mode", "tailnet", "service mode: tailnet, tailcat, netbird, or local")
-	flag.StringVar(&cfg.listen, "listen", "", "listen address (default \":80\" for tailnet/tailcat/netbird, \":8080\" for local)")
-	flag.StringVar(&cfg.dbPath, "db", "shortlink.db", "path to the SQLite database")
-	flag.StringVar(&cfg.hostname, "hostname", "go", "tailnet: MagicDNS hostname to advertise (default \"go\")")
-	flag.StringVar(&cfg.authKey, "ts-authkey", "", "tailnet: node auth key (default $TS_AUTHKEY; unused after first login)")
-	flag.StringVar(&cfg.stateDir, "state-dir", "", "tailnet: tsnet state directory (default under the user config dir)")
-	flag.StringVar(&cfg.keyFile, "key-file", "shortlink-tailcat.key", "tailcat: persistent node key file (keeps the tc... address stable)")
-	flag.StringVar(&cfg.netbirdAPI, "netbird-api", "https://api.netbird.io", "netbird: management API base URL")
-	flag.StringVar(&cfg.netbirdToken, "netbird-token", "", "netbird: management API token (default $NETBIRD_API_TOKEN)")
-	flag.StringVar(&cfg.netbirdIface, "netbird-iface", "wt0", "netbird: WireGuard interface to bind")
-	flag.StringVar(&cfg.netbirdAdminGroup, "netbird-admin-group", "shortlink-admin", "netbird: peer group granted admin (empty for none)")
-	flag.BoolVar(&cfg.open, "open", false, "disable ownership checks; anyone may edit any link")
-	flag.Parse()
+	cfg, opts, err := parseFlags(os.Args[1:], os.LookupEnv)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		log.Fatalf("shortlink: %v", err)
+	}
 
-	if *showVersion {
-		fmt.Println("shortlink", version)
+	if opts.version {
+		fmt.Println("shortlink", versionString())
 		return
 	}
+
+	logger, err := newLogger(opts.logLevel, opts.logFormat)
+	if err != nil {
+		log.Fatalf("shortlink: %v", err)
+	}
+	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if err := run(ctx, cfg); err != nil {
 		log.Fatalf("shortlink: %v", err)
+	}
+}
+
+// options holds the flags that configure the process itself rather than the
+// service it starts.
+type options struct {
+	version   bool
+	logLevel  string
+	logFormat string
+}
+
+// prefixedLogf adapts a printf-style logger from a Tailscale library onto slog.
+// Their lines are chatty and often multi-line, so each becomes one trimmed
+// Debug message tagged with the library it came from; run with
+// -log-level debug to see them.
+func prefixedLogf(prefix string) func(format string, args ...any) {
+	return func(format string, args ...any) {
+		msg := strings.TrimSpace(fmt.Sprintf(format, args...))
+		if i := strings.IndexByte(msg, '\n'); i > 0 {
+			msg = msg[:i]
+		}
+		if msg != "" {
+			slog.Default().Debug(prefix + ": " + msg)
+		}
+	}
+}
+
+// parseFlags parses args (without the program name).
+//
+// Every flag also reads a SHORTLINK_<FLAG> environment variable, so a systemd
+// EnvironmentFile or a .env file can configure the service without rewriting a
+// command line: -log-level reads SHORTLINK_LOG_LEVEL, -db reads SHORTLINK_DB.
+// Values are applied before parsing, so a flag on the command line always wins.
+func parseFlags(args []string, lookupEnv func(string) (string, bool)) (config, options, error) {
+	var cfg config
+	var opts options
+
+	fs := flag.NewFlagSet("shortlink", flag.ContinueOnError)
+	fs.BoolVar(&opts.version, "version", false, "print version and exit")
+	fs.StringVar(&cfg.mode, "mode", "tailnet", "service mode: tailnet, tailcat, netbird, or local")
+	fs.StringVar(&cfg.listen, "listen", "", "listen address (default \":80\" for tailnet/tailcat/netbird, \":8080\" for local)")
+	fs.StringVar(&cfg.dbPath, "db", "shortlink.db", "path to the SQLite database")
+	fs.StringVar(&cfg.hostname, "hostname", "go", "tailnet: MagicDNS hostname to advertise")
+	fs.StringVar(&cfg.authKey, "ts-authkey", "", "tailnet: node auth key (default $TS_AUTHKEY; unused after first login)")
+	fs.StringVar(&cfg.stateDir, "state-dir", "", "tailnet: tsnet node state directory (default under the user config dir)")
+	fs.StringVar(&cfg.keyFile, "key-file", "shortlink-tailcat.key", "tailcat: persistent node key file (keeps the tc... address stable)")
+	fs.StringVar(&cfg.netbirdAPI, "netbird-api", "https://api.netbird.io", "netbird: management API base URL")
+	fs.StringVar(&cfg.netbirdToken, "netbird-token", "", "netbird: management API token (default $NETBIRD_API_TOKEN)")
+	fs.StringVar(&cfg.netbirdIface, "netbird-iface", "wt0", "netbird: WireGuard interface to bind")
+	fs.StringVar(&cfg.netbirdAdminGroup, "netbird-admin-group", "shortlink-admin", "netbird: peer group granted admin (empty for none)")
+	fs.BoolVar(&cfg.open, "open", false, "disable ownership checks; anyone may edit any link")
+	fs.StringVar(&opts.logLevel, "log-level", "info", "log level: debug, info, warn, or error")
+	fs.StringVar(&opts.logFormat, "log-format", "text", "log format: text or json")
+
+	if err := applyEnv(fs, lookupEnv); err != nil {
+		return cfg, opts, err
+	}
+	if err := fs.Parse(args); err != nil {
+		return cfg, opts, err
+	}
+	if fs.NArg() > 0 {
+		return cfg, opts, fmt.Errorf("unexpected argument %q (shortlink takes flags only, e.g. -%s %s)",
+			fs.Arg(0), fs.Arg(0), fs.Arg(0))
+	}
+	return cfg, opts, nil
+}
+
+// envName maps a flag name to its environment variable: -log-level reads
+// SHORTLINK_LOG_LEVEL, -netbird-api reads SHORTLINK_NETBIRD_API.
+func envName(flagName string) string {
+	return "SHORTLINK_" + strings.ToUpper(strings.ReplaceAll(flagName, "-", "_"))
+}
+
+// applyEnv seeds every flag from its environment variable. It runs before
+// Parse, so a flag given on the command line still takes precedence.
+func applyEnv(fs *flag.FlagSet, lookupEnv func(string) (string, bool)) error {
+	var bad []string
+	fs.VisitAll(func(f *flag.Flag) {
+		name := envName(f.Name)
+		val, ok := lookupEnv(name)
+		if !ok || val == "" {
+			return
+		}
+		// f.Value.Set rather than fs.Set: the latter marks the flag as
+		// explicitly set, which makes -h print its default twice.
+		if err := f.Value.Set(val); err != nil {
+			bad = append(bad, fmt.Sprintf("%s=%q is not a valid -%s value: %v", name, val, f.Name, err))
+		}
+	})
+	if len(bad) > 0 {
+		return errors.New(strings.Join(bad, "; "))
+	}
+	return nil
+}
+
+// versionString is the version to report: the linker-injected version when
+// present, plus the VCS revision from the embedded build info so a binary
+// built outside the release process is still traceable to a commit.
+func versionString() string {
+	v := version
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if rev := vcsRevision(bi); rev != "" {
+			v += "+" + rev
+		}
+	}
+	return v
+}
+
+func vcsRevision(bi *debug.BuildInfo) string {
+	for _, s := range bi.Settings {
+		if s.Key != "vcs.revision" {
+			continue
+		}
+		rev := s.Value
+		if len(rev) > 7 {
+			rev = rev[:7]
+		}
+		if s.Key == "vcs.revision" {
+			for _, other := range bi.Settings {
+				if other.Key == "vcs.modified" && other.Value == "true" {
+					rev += "-dirty"
+				}
+			}
+		}
+		return rev
+	}
+	return ""
+}
+
+// newLogger builds the process logger. -log-format json is for log shippers;
+// text is for reading on a terminal.
+func newLogger(level, format string) (*slog.Logger, error) {
+	var lv slog.Level
+	if err := lv.UnmarshalText([]byte(level)); err != nil {
+		return nil, fmt.Errorf("invalid -log-level %q: %w", level, err)
+	}
+	opts := &slog.HandlerOptions{Level: lv}
+	switch format {
+	case "text":
+		return slog.New(slog.NewTextHandler(os.Stderr, opts)), nil
+	case "json":
+		return slog.New(slog.NewJSONHandler(os.Stderr, opts)), nil
+	default:
+		return nil, fmt.Errorf("invalid -log-format %q (want text or json)", format)
 	}
 }
 
@@ -105,13 +253,31 @@ func run(ctx context.Context, cfg config) error {
 		defer func() { _ = svc.closeBackend() }()
 	}
 
-	h, err := web.New(web.Config{Store: st, Identity: svc.identity, Open: cfg.open})
+	logger := slog.Default()
+	h, err := web.New(web.Config{
+		Store:    st,
+		Identity: svc.identity,
+		Open:     cfg.open,
+		Logger:   logger,
+	})
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	// A panic in a handler becomes a 500 instead of a dropped connection.
+	srv := &http.Server{
+		Handler:           web.LogPanics(h, logger),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
-	log.Printf("shortlink %s serving in %s mode on %s (db %s)", version, cfg.mode, svc.ln.Addr(), cfg.dbPath)
+	logger.Info("shortlink starting",
+		slog.String("version", versionString()),
+		slog.String("mode", cfg.mode),
+		slog.String("addr", svc.ln.Addr().String()),
+		slog.String("db", cfg.dbPath),
+	)
 	for _, line := range svc.banner {
 		fmt.Fprintln(os.Stdout, line)
 	}
@@ -121,7 +287,7 @@ func run(ctx context.Context, cfg config) error {
 
 	select {
 	case <-ctx.Done():
-		log.Printf("shutting down")
+		logger.Info("shutting down")
 	case err := <-serveErr:
 		if !errors.Is(err, http.ErrServerClosed) {
 			return err

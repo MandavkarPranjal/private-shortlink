@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -32,7 +31,7 @@ func setupTailcat(ctx context.Context, cfg config) (*service, error) {
 	s := &tailcat.Server{
 		Key:          nodeKey,
 		PresharedKey: psk,
-		Logf:         log.Printf,
+		Logf:         prefixedLogf("tailcat"),
 	}
 	ln, err := s.Listen(ctx, "tcp", addr)
 	if err != nil {

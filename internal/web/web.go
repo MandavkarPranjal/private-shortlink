@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -33,12 +34,14 @@ type Handler struct {
 	open     bool
 	tmpl     *template.Template
 	mux      *http.ServeMux
+	log      *slog.Logger // nil disables request logging
 }
 
 type Config struct {
 	Store    *store.Store
 	Identity IdentityFunc // nil defaults to an anonymous, non-admin identity
 	Open     bool         // disable ownership checks (ownership still recorded)
+	Logger   *slog.Logger // nil disables request logging
 }
 
 func New(cfg Config) (*Handler, error) {
@@ -52,7 +55,7 @@ func New(cfg Config) (*Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("web: parse templates: %w", err)
 	}
-	h := &Handler{st: cfg.Store, identity: cfg.Identity, open: cfg.Open, tmpl: tmpl}
+	h := &Handler{st: cfg.Store, identity: cfg.Identity, open: cfg.Open, tmpl: tmpl, log: cfg.Logger}
 	h.mux = http.NewServeMux()
 	h.routes()
 	return h, nil
@@ -67,10 +70,6 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("GET /-/api", h.handleAPIList)
 	h.mux.HandleFunc("GET /-/api/{name...}", h.handleAPIGet)
 	h.mux.HandleFunc("GET /{name...}", h.handleRedirect)
-}
-
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.mux.ServeHTTP(w, r)
 }
 
 // ---------- helpers ----------
@@ -174,7 +173,7 @@ func (h *Handler) handleHome(w http.ResponseWriter, r *http.Request) {
 	h.render(w, http.StatusOK, "index.html", homeData{
 		Links:    links,
 		Query:    q,
-		Identity: h.identity(r),
+		Identity: h.idOf(r),
 		Msg:      r.URL.Query().Get("msg"),
 		MsgKind:  r.URL.Query().Get("kind"),
 		ShowForm: true,
@@ -182,7 +181,7 @@ func (h *Handler) handleHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleSave(w http.ResponseWriter, r *http.Request) {
-	id := h.identity(r)
+	id := h.idOf(r)
 	jsonMode := wantsJSON(r)
 
 	var name, rawurl string
@@ -284,7 +283,7 @@ func (h *Handler) renderHomeError(w http.ResponseWriter, r *http.Request, status
 	h.render(w, status, "index.html", homeData{
 		Links:    links,
 		Query:    q,
-		Identity: h.identity(r),
+		Identity: h.idOf(r),
 		Msg:      msg,
 		MsgKind:  "err",
 		FormName: name,
@@ -294,7 +293,7 @@ func (h *Handler) renderHomeError(w http.ResponseWriter, r *http.Request, status
 }
 
 func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request) {
-	id := h.identity(r)
+	id := h.idOf(r)
 	jsonMode := wantsJSON(r)
 
 	var name string
@@ -368,7 +367,7 @@ func (h *Handler) handleEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database error", http.StatusInternalServerError)
 		return
 	}
-	id := h.identity(r)
+	id := h.idOf(r)
 	if !h.canModify(id, l) {
 		http.Error(w, fmt.Sprintf("link %q is owned by %s", l.Name, l.Owner), http.StatusForbidden)
 		return

@@ -1,0 +1,204 @@
+package main
+
+import (
+	"bytes"
+	"log/slog"
+	"os"
+	"runtime/debug"
+	"strings"
+	"testing"
+)
+
+func TestNewLoggerRejectsBadInput(t *testing.T) {
+	for _, level := range []string{"debug", "info", "warn", "error", "INFO", "WARN"} {
+		if _, err := newLogger(level, "text"); err != nil {
+			t.Errorf("newLogger(%q, text): %v", level, err)
+		}
+	}
+	if _, err := newLogger("verbose", "text"); err == nil {
+		t.Error("newLogger with an unknown level: want error")
+	}
+	if _, err := newLogger("info", "logfmt"); err == nil {
+		t.Error("newLogger with an unknown format: want error")
+	}
+}
+
+// captureStderr swaps os.Stderr for a pipe, runs fn, and returns what was
+// written. newLogger resolves os.Stderr at construction time, so the swap must
+// happen before the call under test.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
+
+func TestNewLoggerWritesToStderr(t *testing.T) {
+	// Anything the operator captures with journald must include log output.
+	out := captureStderr(t, func() {
+		l, err := newLogger("info", "json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.Info("hello", slog.String("k", "v"))
+	})
+	if !strings.Contains(out, `"k":"v"`) {
+		t.Errorf("json log line = %q", out)
+	}
+}
+
+func TestNewLoggerRespectsLevel(t *testing.T) {
+	out := captureStderr(t, func() {
+		warn, err := newLogger("warn", "text")
+		if err != nil {
+			t.Fatal(err)
+		}
+		warn.Info("filtered")
+		warn.Warn("kept")
+		warn.Error("kept too")
+	})
+	if strings.Contains(out, "filtered") {
+		t.Errorf("Info line survived a Warn threshold: %q", out)
+	}
+	for _, want := range []string{"kept", "kept too"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in output: %q", want, out)
+		}
+	}
+}
+
+func TestNewLoggerTextFormat(t *testing.T) {
+	out := captureStderr(t, func() {
+		l, err := newLogger("debug", "text")
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.Debug("plain")
+	})
+	if !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "msg=plain") {
+		t.Errorf("text log line = %q", out)
+	}
+}
+
+func TestVersionString(t *testing.T) {
+	orig := version
+	t.Cleanup(func() { version = orig })
+
+	version = "1.2.3"
+	got := versionString()
+	if !strings.HasPrefix(got, "1.2.3") {
+		t.Errorf("versionString() = %q, want it to start with 1.2.3", got)
+	}
+	// A test binary carries no VCS settings, so no stray "+" suffix.
+	if suffix := strings.TrimPrefix(got, "1.2.3"); suffix != "" && !strings.HasPrefix(suffix, "+") {
+		t.Errorf("unexpected version suffix %q", suffix)
+	}
+}
+
+func TestVCSRevision(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *debug.BuildInfo
+		want string
+	}{
+		{"none", &debug.BuildInfo{}, ""},
+		{
+			"long commit",
+			&debug.BuildInfo{Settings: []debug.BuildSetting{
+				{Key: "vcs.revision", Value: "0123456789abcdef"},
+			}},
+			"0123456",
+		},
+		{
+			"dirty tree",
+			&debug.BuildInfo{Settings: []debug.BuildSetting{
+				{Key: "vcs.revision", Value: "0123456789abcdef"},
+				{Key: "vcs.modified", Value: "true"},
+			}},
+			"0123456-dirty",
+		},
+		{
+			"clean tree",
+			&debug.BuildInfo{Settings: []debug.BuildSetting{
+				{Key: "vcs.revision", Value: "0123456789abcdef"},
+				{Key: "vcs.modified", Value: "false"},
+			}},
+			"0123456",
+		},
+		{
+			"empty revision",
+			&debug.BuildInfo{Settings: []debug.BuildSetting{
+				{Key: "vcs.revision", Value: ""},
+			}},
+			"",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := vcsRevision(tc.in); got != tc.want {
+				t.Errorf("vcsRevision = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPrefixedLogf covers the printf-style adapter the tsnet and tailcat
+// loggers are wired to: one trimmed Debug line, empty messages dropped.
+func TestPrefixedLogf(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var sb bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&sb, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	logf := prefixedLogf("tsnet")
+	logf("hello %s\nsecond line", "world")
+	logf("   \n  ")
+	prefixedLogf("tailcat")("up")
+
+	out := sb.String()
+	if !strings.Contains(out, "tsnet: hello world") {
+		t.Errorf("missing trimmed message: %q", out)
+	}
+	if !strings.Contains(out, "tailcat: up") {
+		t.Errorf("tailcat prefix missing: %q", out)
+	}
+	if strings.Contains(out, "second line") {
+		t.Errorf("multi-line tail not trimmed: %q", out)
+	}
+	if n := strings.Count(strings.TrimSpace(out), "\n") + 1; n != 2 {
+		t.Errorf("got %d log lines, want 2:\n%s", n, out)
+	}
+}
+
+// TestPrefixedLogfRespectsLevel documents that Tailscale chatter disappears by
+// default.
+func TestPrefixedLogfRespectsLevel(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var sb bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&sb, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	prefixedLogf("tsnet")("chatter")
+	if sb.String() != "" {
+		t.Errorf("library log at info level: %q", sb.String())
+	}
+}
