@@ -169,10 +169,10 @@ func TestPrefixedLogf(t *testing.T) {
 	var sb bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewTextHandler(&sb, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-	logf := prefixedLogf("tsnet")
+	logf := prefixedLogf("tsnet", slog.LevelInfo)
 	logf("hello %s\nsecond line", "world")
 	logf("   \n  ")
-	prefixedLogf("tailcat")("up")
+	prefixedLogf("tailcat", slog.LevelDebug)("up")
 
 	out := sb.String()
 	if !strings.Contains(out, "tsnet: hello world") {
@@ -189,16 +189,29 @@ func TestPrefixedLogf(t *testing.T) {
 	}
 }
 
-// TestPrefixedLogfRespectsLevel documents that Tailscale chatter disappears by
-// default.
+// TestPrefixedLogfRespectsLevel documents that the verbose backend chatter is
+// hidden at the default level while the operator-facing lines (the tsnet login
+// URL) still come through.
 func TestPrefixedLogfRespectsLevel(t *testing.T) {
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	var sb bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewTextHandler(&sb, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	prefixedLogf("tsnet")("chatter")
+
+	prefixedLogf("tailcat", slog.LevelDebug)("chatter")
 	if sb.String() != "" {
-		t.Errorf("library log at info level: %q", sb.String())
+		t.Errorf("backend chatter visible at info level: %q", sb.String())
+	}
+
+	// The first-run login URL goes through tsnet's UserLogf; if it were logged
+	// at debug there would be no way to log in without -log-level debug.
+	sb.Reset()
+	// tsnet's printAuthURLLoop emits exactly this line, once per second, while
+	// the node is unauthenticated.
+	prefixedLogf("tsnet", slog.LevelInfo)("To start this tsnet server, restart with TS_AUTHKEY set, or go to: https://login.tailscale.com/a/abc123")
+	out := sb.String()
+	if !strings.Contains(out, "https://login.tailscale.com/a/abc123") {
+		t.Errorf("auth URL must survive the default level: %q", out)
 	}
 }

@@ -32,7 +32,10 @@ lists every task; `mise tasks info <name>` describes one. The binary reports the
 git revision it was built from, so a deployed build is traceable:
 
 ```sh
-./shortlink -version          # v0.2.0+a1b2c3d   (+…-dirty if uncommitted)
+# a `mise run build` binary, stamped with `git describe`:
+./shortlink -version          # shortlink v0.2.1-4-ga1b2c3d
+# a bare `go build`, unstamped, plus the commit it came from:
+#                              # shortlink 0.2.0+a1b2c3d   (…-dirty if uncommitted)
 ```
 
 Secrets you don't want in your shell history can live in a `.env` file (mise
@@ -228,6 +231,16 @@ service without a long command line: `-log-level` reads `SHORTLINK_LOG_LEVEL`,
 flag given on the command line always wins. `TS_AUTHKEY` and
 `NETBIRD_API_TOKEN` keep their existing names.
 
+A variable that is set but empty counts as a value, which is how a setting that
+defaults to something gets turned off:
+
+```sh
+SHORTLINK_NETBIRD_ADMIN_GROUP=    # no netbird peer gets admin rights
+```
+
+An unusable value is fatal only if no flag overrode it, so
+`SHORTLINK_LOG_FORMAT=xml ./shortlink -log-format json` starts normally.
+
 ## Logging
 
 Logs are structured (`log/slog`) and go to stderr, ready for the journal or a
@@ -237,16 +250,27 @@ shipper:
 ./shortlink -mode local -log-format json -log-level debug
 ```
 
-One line per request, with the resolved identity:
+One line per request:
 
 ```
 level=WARN msg=request method=GET path=/-/edit/blog status=403 bytes=29 duration=142µs who=bob
 ```
 
+`who` is the caller's login name when the route needed one, and the peer's
+address otherwise. The identity lookup is deferred until a handler asks for it,
+because in tailnet mode it is a WhoIs round-trip to tailscaled and redirects are
+the hot path:
+
+```
+level=DEBUG msg=request method=GET path=/blog status=302 bytes=47 duration=142µs who=100.64.0.7
+```
+
 Levels are chosen so that `-log-level info` shows only what needs attention:
 4xx is `WARN`, 5xx is `ERROR`, and successful requests and redirects are
 `DEBUG` — every click on a link is a redirect, so logging those at info would
-bury the rest. `debug` also surfaces tsnet/tailcat chatter.
+bury the rest. A panicking handler still gets its access line, as a 500.
+`debug` also surfaces the tailcat backend chatter; the tsnet login URL on first
+run is logged at `INFO`, because it is the one line you cannot do without.
 
 ## Deployment
 
@@ -254,9 +278,14 @@ bury the rest. `debug` also surfaces tsnet/tailcat chatter.
 
 `deploy/shortlink.service` runs the binary as an unprivileged `shortlink` user
 with `StateDirectory=shortlink`, a locked-down capability set, and the standard
-hardening directives. Per-mode capabilities are documented in the unit; the
-short version is that tailnet mode needs `CAP_NET_ADMIN` (tsnet creates a TUN
-device) and a port below 1024 needs `CAP_NET_BIND_SERVICE`.
+hardening directives. It passes no `-mode`, so `SHORTLINK_MODE` in the
+environment file is the single place to choose the mode.
+
+No mode needs a capability except for one case: binding a port below 1024 needs
+`CAP_NET_BIND_SERVICE`. Tailnet mode needs none at all — tsnet embeds a
+userspace network stack (gVisor), so it creates no TUN device and needs no
+elevated rights. NetBird mode binds a port on the host's existing WireGuard
+interface and does not manage the device either.
 
 ```sh
 # build and install
@@ -290,26 +319,35 @@ docker run -d --name shortlink \
   shortlink:local
 ```
 
-The default command is local mode on port 8080. For the mesh modes you need
-host networking and a TUN device, so override the command:
+The default command is local mode on port 8080. Overriding the command replaces
+it wholesale, so a mesh-mode run has to name the paths it wants to keep
+persistent — the working directory is `/data`, so even the relative defaults land
+in the volume. Neither mesh mode needs a TUN device: tsnet's stack is
+userspace, and netbird binds a port on the host's existing WireGuard interface.
 
 ```sh
-# tailnet: tsnet creates a TUN device, so it needs NET_ADMIN
+# tailnet: the embedded node serves on the tailnet, so it needs no port
+# published and no capabilities at all
 docker run -d --name shortlink \
-  --network host --device /dev/net/tun --cap-add NET_ADMIN \
   -e TS_AUTHKEY=tskey-auth-... \
-  -v shortlink-config:/config \
-  shortlink:local -mode tailnet -state-dir /config/shortlink-tsnet
+  -v shortlink-data:/data -v shortlink-config:/config \
+  shortlink:local -mode tailnet -db /data/shortlink.db \
+  -state-dir /config/shortlink-tsnet
 
-# netbird: binds the mesh interface, which needs the host network namespace
+# netbird: binds port 80 on the host's mesh interface, which needs the host
+# network namespace and NET_BIND_SERVICE
 docker run -d --name shortlink \
   --network host --cap-add NET_BIND_SERVICE \
   -e NETBIRD_API_TOKEN=nbp_... \
   -v shortlink-data:/data \
-  shortlink:local -mode netbird
+  shortlink:local -mode netbird -db /data/shortlink.db
 ```
 
-`mise run docker:build` stamps the version and revision from git.
+`mise run docker:build` stamps the version and commit from git. A bare
+`docker build` cannot: `.git` is excluded from the build context on purpose, so
+pass the version yourself with
+`--build-arg VERSION="$(git describe --tags --always --long)"`. Without it the
+binary reports itself as an unstamped development build.
 
 ## Data
 

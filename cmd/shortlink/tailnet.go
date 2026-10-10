@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -46,7 +47,11 @@ func setupTailnet(ctx context.Context, cfg config) (*service, error) {
 		Dir:      dir,
 		Hostname: cfg.hostname,
 		AuthKey:  authKey,
-		UserLogf: prefixedLogf("tsnet"),
+		// tsnet routes the lines it means for the operator — notably the
+		// interactive login URL on first run — through UserLogf, so this one
+		// stays at info. The verbose backend sink (Server.Logf) is the one
+		// that belongs at debug, and it is left unset.
+		UserLogf: prefixedLogf("tsnet", slog.LevelInfo),
 	}
 
 	// Up logs in (or prints an auth URL) and waits until the node is running.
