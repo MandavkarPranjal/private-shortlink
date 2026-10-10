@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"flag"
-	"os"
 	"strings"
 	"testing"
 )
@@ -239,30 +238,34 @@ func TestEveryFlagHasAnEnvName(t *testing.T) {
 	var opts options
 	fs := newFlagSet(&cfg, &opts)
 
-	seen := map[string]bool{}
+	// boolFlag is how the flag package marks a value that only accepts "true"
+	// and "false". Testing for it keeps this test working when a boolean flag is
+	// added: anything else gets a string.
+	boolFlag := func(f *flag.Flag) bool {
+		b, ok := f.Value.(interface{ IsBoolFlag() bool })
+		return ok && b.IsBoolFlag()
+	}
+
+	env := map[string]string{}
 	fs.VisitAll(func(f *flag.Flag) {
 		name := envName(f.Name)
 		if !strings.HasPrefix(name, "SHORTLINK_") || name != strings.ToUpper(name) {
 			t.Errorf("flag -%s maps to unusable env name %q", f.Name, name)
 		}
-		if seen[name] {
+		if _, dup := env[name]; dup {
 			t.Errorf("env name %q is claimed by two flags", name)
 		}
-		seen[name] = true
+		env[name] = "sentinel"
+		if boolFlag(f) {
+			env[name] = "true"
+		}
 	})
-	if len(seen) == 0 {
+	if len(env) == 0 {
 		t.Fatal("no flags declared")
 	}
-	// Every env name must also round-trip through parseFlags. Booleans need a
-	// boolean value; the rest take any string.
-	for name := range seen {
-		if strings.HasSuffix(strings.ToLower(name), "open") || strings.HasSuffix(strings.ToLower(name), "version") {
-			t.Setenv(name, "true")
-			continue
-		}
-		t.Setenv(name, "sentinel")
-	}
-	if _, _, err := parseFlags(nil, os.LookupEnv); err != nil {
+	// Every env name must round-trip through parseFlags. The lookup is scoped to
+	// env so an unrelated SHORTLINK_* in the test process cannot fail the run.
+	if _, _, err := parseFlags(nil, envMap(env)); err != nil {
 		t.Fatalf("parseFlags with every variable set: %v", err)
 	}
 }
@@ -270,9 +273,10 @@ func TestEveryFlagHasAnEnvName(t *testing.T) {
 // A flag and its environment variable must agree on the value: if envName were
 // changed, the environment would silently stop configuring the flag.
 func TestEnvVarReachesItsFlag(t *testing.T) {
-	t.Setenv("SHORTLINK_DB", "/from/env.db")
-	t.Setenv("SHORTLINK_NETBIRD_IFACE", "wt9")
-	cfg, _, err := parseFlags(nil, os.LookupEnv)
+	cfg, _, err := parseFlags(nil, envMap(map[string]string{
+		"SHORTLINK_DB":            "/from/env.db",
+		"SHORTLINK_NETBIRD_IFACE": "wt9",
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}

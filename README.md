@@ -256,10 +256,11 @@ One line per request:
 level=WARN msg=request method=GET path=/-/edit/blog status=403 bytes=29 duration=142µs who=bob
 ```
 
-`who` is the caller's login name when the route needed one, and the peer's
-address otherwise. The identity lookup is deferred until a handler asks for it,
-because in tailnet mode it is a WhoIs round-trip to tailscaled and redirects are
-the hot path:
+`who` is the identity the route resolved — a tailnet login name, a tailcat
+address, or `anonymous` when there is none — and the peer's address when the
+route needed no identity at all. The lookup is deferred until a handler asks for
+it, because in tailnet mode it is a WhoIs round-trip to tailscaled and redirects
+are the hot path:
 
 ```
 level=DEBUG msg=request method=GET path=/blog status=302 bytes=47 duration=142µs who=100.64.0.7
