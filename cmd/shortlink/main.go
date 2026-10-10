@@ -86,13 +86,24 @@ func main() {
 
 // fatalf reports a startup failure and exits.
 //
-// It writes straight to stderr instead of going through slog: once
-// slog.SetDefault has installed the process logger, the std logger that
-// log.Fatalf uses is redirected to it, so at -log-level warn or error the
-// message that explains the exit would itself be filtered out.
+// It logs at error level rather than writing plain text, for two reasons. The
+// std logger that log.Fatalf uses is redirected into the process logger by
+// slog.SetDefault, and it logs at info, so at -log-level warn or error the
+// message explaining the exit would be filtered out by the exit it explains.
+// And a plain-text line would be the only non-JSON line in a stream that
+// -log-format json promised to be JSON. Error records survive every level a
+// caller can configure, including the `error` one.
+//
+// Before slog.SetDefault runs, the default slog handler writes text to stderr,
+// so the same call still reports a bad flag or a bad -log-level plainly.
 func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "shortlink: "+format+"\n", args...)
+	fatalLogf(format, args...)
 	os.Exit(1)
+}
+
+// fatalLogf is fatalf without the exit, so a test can assert on the record.
+func fatalLogf(format string, args ...any) {
+	slog.Error("shortlink: " + fmt.Sprintf(format, args...))
 }
 
 // options holds the flags that configure the process itself rather than the
@@ -102,6 +113,18 @@ type options struct {
 	logLevel  string
 	logFormat string
 }
+
+// The log levels the Tailscale libraries are wired to. They live here so the
+// tests can assert against the wiring that actually ships rather than a level
+// the test picked itself.
+const (
+	// tsnetUserLogLevel is for tsnet's Server.UserLogf, the sink for lines
+	// meant for the operator. It has to be info or lower: the first-run login
+	// URL goes there, and at debug there is no way to log in.
+	tsnetUserLogLevel = slog.LevelInfo
+	// tailcatLogLevel is for tailcat's Server.Logf, the verbose backend sink.
+	tailcatLogLevel = slog.LevelDebug
+)
 
 // prefixedLogf adapts a printf-style logger from a Tailscale library onto slog.
 // Each line becomes one message tagged with the library it came from, truncated

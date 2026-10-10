@@ -85,6 +85,59 @@ func TestNewLoggerRespectsLevel(t *testing.T) {
 	}
 }
 
+// A fatal message is the last thing the process says before exiting. It has to
+// land in the configured format, or a -log-format json stream carries one
+// unparseable line at exactly the moment someone is debugging a startup
+// failure.
+func TestFatalLogfUsesTheConfiguredFormat(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	for _, format := range []string{"json", "text"} {
+		t.Run(format, func(t *testing.T) {
+			// newLogger binds os.Stderr, so it must run inside captureStderr.
+			out := captureStderr(t, func() {
+				l, err := newLogger("info", format)
+				if err != nil {
+					t.Fatal(err)
+				}
+				slog.SetDefault(l)
+				fatalLogf("cannot open %s", "/var/lib/shortlink/shortlink.db")
+			})
+			if !strings.Contains(out, "/var/lib/shortlink/shortlink.db") {
+				t.Errorf("fatal message lost: %q", out)
+			}
+			if format == "json" && !strings.HasPrefix(strings.TrimSpace(out), "{") {
+				t.Errorf("fatal message is not a JSON record: %q", out)
+			}
+		})
+	}
+}
+
+// An error record survives every level a caller can configure, including the
+// one that drops everything but errors. Losing the fatal message to its own
+// log threshold would exit with no explanation at all.
+func TestFatalLogfSurvivesEveryLevel(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	for _, level := range []string{"debug", "info", "warn", "error"} {
+		t.Run(level, func(t *testing.T) {
+			out := captureStderr(t, func() {
+				l, err := newLogger(level, "text")
+				if err != nil {
+					t.Fatal(err)
+				}
+				slog.SetDefault(l)
+				fatalLogf("boom")
+			})
+			if !strings.Contains(out, "boom") {
+				t.Errorf("fatal message filtered at -log-level %s: %q", level, out)
+			}
+		})
+	}
+}
+
 func TestNewLoggerTextFormat(t *testing.T) {
 	out := captureStderr(t, func() {
 		l, err := newLogger("debug", "text")
@@ -169,7 +222,7 @@ func TestPrefixedLogf(t *testing.T) {
 	var sb bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewTextHandler(&sb, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-	logf := prefixedLogf("tsnet", slog.LevelInfo)
+	logf := prefixedLogf("tsnet", tsnetUserLogLevel)
 	logf("hello %s\nsecond line", "world")
 	logf("   \n  ")
 	prefixedLogf("tailcat", slog.LevelDebug)("up")
@@ -199,19 +252,35 @@ func TestPrefixedLogfRespectsLevel(t *testing.T) {
 	var sb bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewTextHandler(&sb, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
-	prefixedLogf("tailcat", slog.LevelDebug)("chatter")
+	// These use the levels the servers are actually constructed with, so
+	// rewiring setupTailnet or setupTailcat to debug fails here rather than
+	// leaving a test that passes while the login URL is invisible.
+	prefixedLogf("tailcat", tailcatLogLevel)("chatter")
 	if sb.String() != "" {
 		t.Errorf("backend chatter visible at info level: %q", sb.String())
 	}
 
-	// The first-run login URL goes through tsnet's UserLogf; if it were logged
-	// at debug there would be no way to log in without -log-level debug.
-	sb.Reset()
 	// tsnet's printAuthURLLoop emits exactly this line, once per second, while
 	// the node is unauthenticated.
-	prefixedLogf("tsnet", slog.LevelInfo)("To start this tsnet server, restart with TS_AUTHKEY set, or go to: https://login.tailscale.com/a/abc123")
+	sb.Reset()
+	prefixedLogf("tsnet", tsnetUserLogLevel)("To start this tsnet server, restart with TS_AUTHKEY set, or go to: https://login.tailscale.com/a/abc123")
 	out := sb.String()
 	if !strings.Contains(out, "https://login.tailscale.com/a/abc123") {
 		t.Errorf("auth URL must survive the default level: %q", out)
+	}
+	if !strings.Contains(out, "level=INFO") {
+		t.Errorf("auth URL should log at info: %q", out)
+	}
+}
+
+// The level constants only matter if they are the ones the servers use. Assert
+// the wiring directly, so a future edit to setupTailnet cannot quietly drop the
+// login URL below the default level.
+func TestTsnetUserLogLevelIsInfoOrHigher(t *testing.T) {
+	if tsnetUserLogLevel > slog.LevelInfo {
+		t.Errorf("tsnetUserLogLevel = %v; the login URL is logged through UserLogf, so it must be visible at the default level", tsnetUserLogLevel)
+	}
+	if tailcatLogLevel != slog.LevelDebug {
+		t.Errorf("tailcatLogLevel = %v, want debug for the verbose backend sink", tailcatLogLevel)
 	}
 }
