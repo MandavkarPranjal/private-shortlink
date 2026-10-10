@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"flag"
+	"os"
 	"strings"
 	"testing"
 )
@@ -94,14 +95,35 @@ func TestParseFlagsArgBeatsEnv(t *testing.T) {
 	}
 }
 
-func TestParseFlagsEmptyEnvIgnored(t *testing.T) {
-	// An env file with `FOO=` must not blank out a flag default.
-	cfg, _, err := parseFlags(nil, envMap(map[string]string{"SHORTLINK_HOSTNAME": ""}))
+// An unset variable leaves the default alone; a variable that is set but empty
+// is a value, because that is how an operator disables a setting that defaults
+// to something.
+func TestParseFlagsEmptyEnvApplied(t *testing.T) {
+	cfg, _, err := parseFlags(nil, envMap(map[string]string{
+		"SHORTLINK_HOSTNAME":            "",
+		"SHORTLINK_NETBIRD_ADMIN_GROUP": "",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.hostname != "" {
+		t.Errorf("hostname = %q, want the empty env value", cfg.hostname)
+	}
+	if cfg.netbirdAdminGroup != "" {
+		t.Errorf("admin group = %q, want empty: an empty variable is how you turn admins off", cfg.netbirdAdminGroup)
+	}
+}
+
+func TestParseFlagsUnsetEnvKeepsDefault(t *testing.T) {
+	cfg, _, err := parseFlags(nil, envMap(map[string]string{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.hostname != "go" {
 		t.Errorf("hostname = %q, want the default \"go\"", cfg.hostname)
+	}
+	if cfg.netbirdAdminGroup != "shortlink-admin" {
+		t.Errorf("admin group = %q, want the default", cfg.netbirdAdminGroup)
 	}
 }
 
@@ -112,6 +134,43 @@ func TestParseFlagsBadEnvValue(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "SHORTLINK_OPEN") {
 		t.Errorf("error should name the variable: %v", err)
+	}
+}
+
+// A command-line flag overrides the environment, so a bad value in the
+// environment must not stop a run that supplied a good one.
+func TestParseFlagsBadEnvValueOverriddenByArg(t *testing.T) {
+	cfg, opts, err := parseFlags(
+		[]string{"-log-format", "json"},
+		envMap(map[string]string{"SHORTLINK_LOG_FORMAT": "xml"}),
+	)
+	if err != nil {
+		t.Fatalf("a flag given on the command line should win over a bad env value: %v", err)
+	}
+	if opts.logFormat != "json" {
+		t.Errorf("log format = %q, want json", opts.logFormat)
+	}
+	if cfg.mode != "tailnet" {
+		t.Errorf("mode = %q, want the default", cfg.mode)
+	}
+}
+
+func TestParseFlagsBadEnvValueStillFatalForOtherFlags(t *testing.T) {
+	_, _, err := parseFlags(
+		[]string{"-log-format", "json"},
+		envMap(map[string]string{
+			"SHORTLINK_LOG_FORMAT": "xml",
+			"SHORTLINK_OPEN":       "yes-please",
+		}),
+	)
+	if err == nil {
+		t.Fatal("an unrelated bad env value must still fail the run")
+	}
+	if !strings.Contains(err.Error(), "SHORTLINK_OPEN") {
+		t.Errorf("error should name the variable that was not overridden: %v", err)
+	}
+	if strings.Contains(err.Error(), "SHORTLINK_LOG_FORMAT") {
+		t.Errorf("error should not mention the overridden flag: %v", err)
 	}
 }
 
@@ -172,26 +231,13 @@ func TestEnvName(t *testing.T) {
 }
 
 // Every flag should be reachable from the environment; otherwise the env file
-// in deploy/ would document knobs that do not exist.
+// in deploy/ would document knobs that do not exist. This walks the real flag
+// set, so a new flag is covered the moment it is declared — no second copy of
+// the list here to forget.
 func TestEveryFlagHasAnEnvName(t *testing.T) {
 	var cfg config
 	var opts options
-	fs := flag.NewFlagSet("shortlink", flag.ContinueOnError)
-	fs.BoolVar(&opts.version, "version", false, "")
-	fs.StringVar(&cfg.mode, "mode", "", "")
-	fs.StringVar(&cfg.listen, "listen", "", "")
-	fs.StringVar(&cfg.dbPath, "db", "", "")
-	fs.StringVar(&cfg.hostname, "hostname", "", "")
-	fs.StringVar(&cfg.authKey, "ts-authkey", "", "")
-	fs.StringVar(&cfg.stateDir, "state-dir", "", "")
-	fs.StringVar(&cfg.keyFile, "key-file", "", "")
-	fs.StringVar(&cfg.netbirdAPI, "netbird-api", "", "")
-	fs.StringVar(&cfg.netbirdToken, "netbird-token", "", "")
-	fs.StringVar(&cfg.netbirdIface, "netbird-iface", "", "")
-	fs.StringVar(&cfg.netbirdAdminGroup, "netbird-admin-group", "", "")
-	fs.BoolVar(&cfg.open, "open", false, "")
-	fs.StringVar(&opts.logLevel, "log-level", "", "")
-	fs.StringVar(&opts.logFormat, "log-format", "", "")
+	fs := newFlagSet(&cfg, &opts)
 
 	seen := map[string]bool{}
 	fs.VisitAll(func(f *flag.Flag) {
@@ -204,7 +250,36 @@ func TestEveryFlagHasAnEnvName(t *testing.T) {
 		}
 		seen[name] = true
 	})
-	if len(seen) != 15 {
-		t.Errorf("covered %d flags, want 15", len(seen))
+	if len(seen) == 0 {
+		t.Fatal("no flags declared")
+	}
+	// Every env name must also round-trip through parseFlags. Booleans need a
+	// boolean value; the rest take any string.
+	for name := range seen {
+		if strings.HasSuffix(strings.ToLower(name), "open") || strings.HasSuffix(strings.ToLower(name), "version") {
+			t.Setenv(name, "true")
+			continue
+		}
+		t.Setenv(name, "sentinel")
+	}
+	if _, _, err := parseFlags(nil, os.LookupEnv); err != nil {
+		t.Fatalf("parseFlags with every variable set: %v", err)
+	}
+}
+
+// A flag and its environment variable must agree on the value: if envName were
+// changed, the environment would silently stop configuring the flag.
+func TestEnvVarReachesItsFlag(t *testing.T) {
+	t.Setenv("SHORTLINK_DB", "/from/env.db")
+	t.Setenv("SHORTLINK_NETBIRD_IFACE", "wt9")
+	cfg, _, err := parseFlags(nil, os.LookupEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.dbPath != "/from/env.db" {
+		t.Errorf("db path = %q, want /from/env.db", cfg.dbPath)
+	}
+	if cfg.netbirdIface != "wt9" {
+		t.Errorf("netbird iface = %q, want wt9", cfg.netbirdIface)
 	}
 }

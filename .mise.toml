@@ -13,13 +13,17 @@ run = "mise tasks ls"
 [tasks.build]
 description = "Build ./shortlink (static, no cgo), stamping the git revision"
 run = "go build -trimpath -ldflags \"-s -w -X main.version=$(mise tasks run _version)\" -o shortlink ./cmd/shortlink"
+# No outputs: the version stamp depends on where HEAD is, which no source glob
+# can see. Caching on the binary alone would keep serving a stale stamp after a
+# commit or a tag.
 sources = ["go.mod", "go.sum", "doc.go", "cmd/**/*.go", "internal/**/*.go", ".mise.toml"]
-outputs = ["shortlink"]
 
 [tasks._version]
-description = "Describe the current tree: nearest tag, or short commit"
+description = "Describe the current tree: nearest tag plus the commit it points at"
 hide = true
-run = "git describe --tags --always 2>/dev/null || echo dev"
+# --long keeps the commit in the string even at an exact tag, so a stamped
+# binary is always traceable to one commit.
+run = "git describe --tags --always --long 2>/dev/null || echo dev"
 
 [tasks."docker:build"]
 description = "Build the container image, stamping the git revision"
@@ -79,6 +83,7 @@ run = "rm -f shortlink"
 
 [tasks.install]
 description = "Install ./shortlink to PREFIX/bin (default /usr/local) for the systemd unit"
+depends = ["build"]
 run = "install -d -m 0755 ${PREFIX:-/usr/local}/bin && install -m 0755 shortlink ${PREFIX:-/usr/local}/bin/shortlink"
 
 [tasks.check]

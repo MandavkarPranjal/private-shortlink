@@ -3,35 +3,62 @@ package web
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"time"
 )
 
-// identityKey is the context key under which ServeHTTP stores the identity it
-// resolved for a request.
-type identityKey struct{}
+// identityHolder is the context key under which ServeHTTP stores the lazy
+// identity for a request. The value is a *identityState, so handlers and the
+// access log can share one resolution without a second WhoIs call.
+type identityHolder struct{}
 
-// withIdentity returns ctx carrying id.
-func withIdentity(ctx context.Context, id Identity) context.Context {
-	return context.WithValue(ctx, identityKey{}, id)
+// identityState memoizes an identity lookup. Resolving is deferred until
+// something actually asks, so the redirect path — the hottest path in the
+// service, since every click is a redirect — costs no WhoIs round-trip to
+// tailscaled.
+type identityState struct {
+	resolve IdentityFunc
+	done    bool
+	id      Identity
 }
 
-// IdentityFrom returns the identity Handler.ServeHTTP resolved for r, if any.
-// Outside a request served by the Handler it reports false.
-func IdentityFrom(ctx context.Context) (Identity, bool) {
-	id, ok := ctx.Value(identityKey{}).(Identity)
-	return id, ok
-}
-
-// idOf returns the identity for r, reusing the one ServeHTTP put on the
-// context. Handlers call this instead of h.identity so that one request costs
-// exactly one identity lookup — in tailnet mode that lookup is a WhoIs call to
-// tailscaled, and in netbird mode a directory read under a lock.
-func (h *Handler) idOf(r *http.Request) Identity {
-	if id, ok := IdentityFrom(r.Context()); ok {
-		return id
+// get resolves the identity on first call and caches it.
+func (s *identityState) get(r *http.Request) Identity {
+	if !s.done {
+		s.id = s.resolve(r)
+		s.done = true
 	}
+	return s.id
+}
+
+// withIdentityState returns ctx carrying a lazily resolved identity for r.
+func withIdentityState(ctx context.Context, r *http.Request, resolve IdentityFunc) context.Context {
+	return context.WithValue(ctx, identityHolder{}, &identityState{resolve: resolve})
+}
+
+// IdentityFrom returns the identity that was already resolved for this request,
+// and whether anything resolved it. It does not trigger a lookup, so it is safe
+// on paths that must not pay for one; outside a request served by the Handler it
+// reports false.
+func IdentityFrom(ctx context.Context) (Identity, bool) {
+	h, ok := ctx.Value(identityHolder{}).(*identityState)
+	if !ok || !h.done {
+		return Identity{}, false
+	}
+	return h.id, true
+}
+
+// idOf returns the identity for r, resolving it at most once per request.
+// Handlers call this instead of h.identity. In tailnet mode a resolution is a
+// WhoIs call to tailscaled and in netbird mode a directory read under a lock,
+// so a second call in the same request is free.
+func (h *Handler) idOf(r *http.Request) Identity {
+	if holder, ok := r.Context().Value(identityHolder{}).(*identityState); ok {
+		return holder.get(r)
+	}
+	// Request did not come through ServeHTTP (a direct call in a test, say).
 	return h.identity(r)
 }
 
@@ -71,25 +98,31 @@ func (w *responseRecorder) Flush() {
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (w *responseRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// ServeHTTP resolves the requester's identity once, dispatches, and writes one
-// structured access-log line per request.
+// ServeHTTP dispatches, recovers panics, and writes one structured access-log
+// line per request.
+//
+// The identity is attached to the context unresolved and only looked up if a
+// handler asks for it (see idOf). The access log therefore reports the peer
+// rather than a login name unless something needed the identity anyway.
 //
 // Redirects and successful reads are logged at Debug: every click on a link is
-// a redirect, so logging them at Info would bury everything else. Client
-// errors are Warn and server errors are Error, so the default level surfaces
-// exactly the requests that need attention.
+// a redirect, so logging them at Info would bury everything else. Client errors
+// are Warn and server errors are Error, so the default level surfaces exactly
+// the requests that need attention.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	id := h.identity(r)
-	r = r.WithContext(withIdentity(r.Context(), id))
+	r = r.WithContext(withIdentityState(r.Context(), r, h.identity))
 
 	if h.log == nil {
-		h.mux.ServeHTTP(w, r)
+		serveRecovering(h.mux, w, r, nil)
 		return
 	}
 
 	start := time.Now()
 	rec := &responseRecorder{ResponseWriter: w}
-	h.mux.ServeHTTP(rec, r)
+	// Recovery happens inside the dispatch this function logs, so a panicking
+	// request still produces an access line — with the status the response
+	// actually got, not the one it would have got.
+	serveRecovering(h.mux, rec, r, h.log)
 
 	status := rec.status
 	if status == 0 {
@@ -101,8 +134,44 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Int("status", status),
 		slog.Int("bytes", rec.bytes),
 		slog.Duration("duration", time.Since(start)),
-		slog.String("who", identityLabel(id)),
+		slog.String("who", requester(r)),
 	)
+}
+
+// serveRecovering runs next, turning a panic in a handler into a 500 instead of
+// a dropped connection. The process is left running: one bad request is not
+// worth restarting the server.
+//
+// If rec is non-nil the caller records the response, so this must only try to
+// write an error status when the handler has not already committed one.
+func serveRecovering(next http.Handler, w http.ResponseWriter, r *http.Request, log *slog.Logger) {
+	defer func() {
+		v := recover()
+		if v == nil {
+			return
+		}
+		if v == http.ErrAbortHandler {
+			panic(v) // the client hung up; not our problem to log
+		}
+		if log != nil {
+			log.Error("panic serving request",
+				slog.String("method", r.Method),
+				slog.String("path", r.URL.Path),
+				slog.Any("panic", v),
+				slog.String("stack", string(debug.Stack())),
+			)
+		}
+		// Once a handler has committed a status, net/http has already sent it
+		// and an http.Error here would only append a body to a response that
+		// claims to be something else. Record 500 for the log instead, and let
+		// the connection close.
+		if rec, ok := w.(*responseRecorder); ok && rec.status != 0 {
+			rec.status = http.StatusInternalServerError
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}()
+	next.ServeHTTP(w, r)
 }
 
 func levelFor(status int) slog.Level {
@@ -116,36 +185,22 @@ func levelFor(status int) slog.Level {
 	}
 }
 
-// identityLabel renders an identity for the log, preferring the resolved name
-// and falling back to a marker so anonymous requests are easy to count.
-func identityLabel(id Identity) string {
-	if id.ID == "" {
-		return "anonymous"
+// requester labels the caller for the access log. It prefers an identity that a
+// handler already resolved — no extra lookup — and otherwise falls back to the
+// peer's address, so a redirect is still attributable without paying for a
+// WhoIs on the hot path. Anonymous callers are marked so they are easy to count.
+func requester(r *http.Request) string {
+	if id, ok := IdentityFrom(r.Context()); ok {
+		if id.ID == "" {
+			return "anonymous"
+		}
+		return id.ID
 	}
-	return id.ID
-}
-
-// LogPanics wraps next so a panic in a handler is logged with its stack and
-// turned into a 500 instead of tearing down the connection silently. The
-// process is left running: one bad request is not worth restarting the server.
-func LogPanics(next http.Handler, log *slog.Logger) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			v := recover()
-			if v == nil {
-				return
-			}
-			if v == http.ErrAbortHandler {
-				panic(v) // the client hung up; not our problem to log
-			}
-			log.Error("panic serving request",
-				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
-				slog.Any("panic", v),
-				slog.String("stack", string(debug.Stack())),
-			)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-		}()
-		next.ServeHTTP(w, r)
-	})
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && host != "" {
+		return host
+	}
+	if r.RemoteAddr == "" {
+		return "unknown"
+	}
+	return r.RemoteAddr
 }

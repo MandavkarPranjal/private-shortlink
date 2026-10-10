@@ -2,8 +2,8 @@
 # the image and a local `mise run build` produce the same static binary.
 FROM golang:1.27-alpine AS build
 
-# git resolves some module paths and lets the linker stamp vcs.revision;
-# ca-certificates is needed for module downloads.
+# git resolves module paths that need fetching; ca-certificates is needed for the
+# downloads themselves.
 RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src
@@ -16,12 +16,15 @@ COPY doc.go ./
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-# The version is stamped at link time; vcs.revision and vcs.modified are
-# embedded automatically from the build context's .git directory.
-ARG VERSION=dev
+# The version is stamped at link time. .git is deliberately not in the build
+# context (.dockerignore), so the commit cannot come from vcs.revision in the
+# build info: pass it in instead. `mise run docker:build` does that with
+# `git describe --tags --always --long`. A bare `docker build` leaves VERSION
+# empty and the binary reports itself as an unstamped development build.
+ARG VERSION=
 RUN CGO_ENABLED=0 go build \
       -trimpath \
-      -ldflags "-s -w -X main.version=${VERSION}" \
+      -ldflags "-s -w${VERSION:+ -X main.version=$VERSION}" \
       -o /out/shortlink ./cmd/shortlink
 
 # State directories with the ownership distroless' nonroot user (65532) needs.
@@ -43,14 +46,24 @@ COPY --from=build --chown=65532:65532 /config /config
 # container replacements.
 VOLUME ["/data", "/config"]
 
+# Working directory is a volume, so a relative -db or -key-file default (the
+# binary falls back to ./shortlink.db and ./shortlink-tailcat.key) still lands in
+# persistent storage. Without this, an overridden CMD that leaves out -db would
+# try to create the database in /, which uid 65532 cannot write to.
+WORKDIR /data
+
 EXPOSE 8080
 USER nonroot:nonroot
 
 # Defaults suit local mode, which binds a high port because nonroot cannot bind
-# port 80. Override the whole CMD for the mesh modes, e.g.
-#   docker run -p 8080:8080 shortlink:latest
-#   docker run --network host --device /dev/net/tun --cap-add NET_ADMIN \
-#     -e TS_AUTHKEY=tskey-auth-... shortlink:latest \
-#     -mode tailnet -state-dir /config/shortlink-tsnet
+# port 80. Overriding CMD replaces the whole list, so a mesh-mode run has to name
+# the paths it wants to keep persistent:
+#   docker run -p 8080:8080 -v shortlink-data:/data shortlink:latest
+#   docker run --network host -e TS_AUTHKEY=tskey-auth-... \
+#     -v shortlink-data:/data -v shortlink-config:/config shortlink:latest \
+#     -mode tailnet -db /data/shortlink.db -state-dir /config/shortlink-tsnet
+# tsnet embeds a userspace network stack, so it needs no TUN device and no
+# capabilities. netbird mode binds a port on the host's mesh interface, which
+# needs host networking and, for port 80, --cap-add NET_BIND_SERVICE.
 ENTRYPOINT ["/usr/local/bin/shortlink"]
-CMD ["-mode", "local", "-listen", ":8080", "-db", "/data/shortlink.db", "-state-dir", "/config/shortlink-tsnet", "-key-file", "/config/shortlink-tailcat.key"]
+CMD ["-mode", "local", "-listen", ":8080", "-db", "/data/shortlink.db", "-state-dir", "/config/shortlink-tsnet", "-key-file", "/data/shortlink-tailcat.key"]

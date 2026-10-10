@@ -5,13 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,10 +21,16 @@ import (
 	"github.com/mandavkarpranjal/private-shortlink/internal/web"
 )
 
-// version is overridden at build time with
-// -ldflags "-X main.version=$(git describe --tags --always)". It is a var, not
-// a const, so the linker can replace it.
-var version = "0.2.0"
+// version is stamped at link time with
+// -ldflags "-X main.version=$(git describe --tags --always --long)" (what
+// `mise run build` and `mise run docker:build` do). It is a var, not a const,
+// so the linker can replace it. Empty means "not stamped", which is what a
+// plain `go build` or `go run` produces; devVersion then names the build and the
+// commit is appended from the embedded build info.
+var version = ""
+
+// devVersion names a build whose version was not stamped by the linker.
+const devVersion = "0.2.0"
 
 type config struct {
 	mode     string
@@ -56,7 +62,7 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
-		log.Fatalf("shortlink: %v", err)
+		fatalf("%v", err)
 	}
 
 	if opts.version {
@@ -66,7 +72,7 @@ func main() {
 
 	logger, err := newLogger(opts.logLevel, opts.logFormat)
 	if err != nil {
-		log.Fatalf("shortlink: %v", err)
+		fatalf("%v", err)
 	}
 	slog.SetDefault(logger)
 
@@ -74,8 +80,19 @@ func main() {
 	defer stop()
 
 	if err := run(ctx, cfg); err != nil {
-		log.Fatalf("shortlink: %v", err)
+		fatalf("%v", err)
 	}
+}
+
+// fatalf reports a startup failure and exits.
+//
+// It writes straight to stderr instead of going through slog: once
+// slog.SetDefault has installed the process logger, the std logger that
+// log.Fatalf uses is redirected to it, so at -log-level warn or error the
+// message that explains the exit would itself be filtered out.
+func fatalf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "shortlink: "+format+"\n", args...)
+	os.Exit(1)
 }
 
 // options holds the flags that configure the process itself rather than the
@@ -87,17 +104,19 @@ type options struct {
 }
 
 // prefixedLogf adapts a printf-style logger from a Tailscale library onto slog.
-// Their lines are chatty and often multi-line, so each becomes one trimmed
-// Debug message tagged with the library it came from; run with
-// -log-level debug to see them.
-func prefixedLogf(prefix string) func(format string, args ...any) {
+// Each line becomes one message tagged with the library it came from, truncated
+// at the first newline because they are often multi-line. level is Debug for
+// the verbose backend chatter (Server.Logf) and Info for the lines meant for
+// the operator (Server.UserLogf), such as the first-run login URL — that one has
+// to survive the default log level or there is no way to log in.
+func prefixedLogf(prefix string, level slog.Level) func(format string, args ...any) {
 	return func(format string, args ...any) {
 		msg := strings.TrimSpace(fmt.Sprintf(format, args...))
 		if i := strings.IndexByte(msg, '\n'); i > 0 {
 			msg = msg[:i]
 		}
 		if msg != "" {
-			slog.Default().Debug(prefix + ": " + msg)
+			slog.Default().Log(context.Background(), level, prefix+": "+msg)
 		}
 	}
 }
@@ -107,11 +126,33 @@ func prefixedLogf(prefix string) func(format string, args ...any) {
 // Every flag also reads a SHORTLINK_<FLAG> environment variable, so a systemd
 // EnvironmentFile or a .env file can configure the service without rewriting a
 // command line: -log-level reads SHORTLINK_LOG_LEVEL, -db reads SHORTLINK_DB.
-// Values are applied before parsing, so a flag on the command line always wins.
+// Environment values are applied before parsing, so a flag on the command line
+// always wins.
 func parseFlags(args []string, lookupEnv func(string) (string, bool)) (config, options, error) {
 	var cfg config
 	var opts options
 
+	fs := newFlagSet(&cfg, &opts)
+
+	badEnv := applyEnv(fs, lookupEnv)
+	if err := fs.Parse(args); err != nil {
+		return cfg, opts, err
+	}
+	if fs.NArg() > 0 {
+		return cfg, opts, fmt.Errorf("unexpected argument %q (shortlink takes flags only, e.g. -%s %s)",
+			fs.Arg(0), fs.Arg(0), fs.Arg(0))
+	}
+	// An unusable environment value is only fatal if nothing overrode it: a bad
+	// SHORTLINK_LOG_FORMAT should not stop a run that passed -log-format json.
+	if err := firstEnvError(badEnv, fs); err != nil {
+		return cfg, opts, err
+	}
+	return cfg, opts, nil
+}
+
+// newFlagSet declares every flag and binds it to cfg/opts. parseFlags and the
+// tests share it, so a new flag cannot drift out of sync with either.
+func newFlagSet(cfg *config, opts *options) *flag.FlagSet {
 	fs := flag.NewFlagSet("shortlink", flag.ContinueOnError)
 	fs.BoolVar(&opts.version, "version", false, "print version and exit")
 	fs.StringVar(&cfg.mode, "mode", "tailnet", "service mode: tailnet, tailcat, netbird, or local")
@@ -128,18 +169,7 @@ func parseFlags(args []string, lookupEnv func(string) (string, bool)) (config, o
 	fs.BoolVar(&cfg.open, "open", false, "disable ownership checks; anyone may edit any link")
 	fs.StringVar(&opts.logLevel, "log-level", "info", "log level: debug, info, warn, or error")
 	fs.StringVar(&opts.logFormat, "log-format", "text", "log format: text or json")
-
-	if err := applyEnv(fs, lookupEnv); err != nil {
-		return cfg, opts, err
-	}
-	if err := fs.Parse(args); err != nil {
-		return cfg, opts, err
-	}
-	if fs.NArg() > 0 {
-		return cfg, opts, fmt.Errorf("unexpected argument %q (shortlink takes flags only, e.g. -%s %s)",
-			fs.Arg(0), fs.Arg(0), fs.Arg(0))
-	}
-	return cfg, opts, nil
+	return fs
 }
 
 // envName maps a flag name to its environment variable: -log-level reads
@@ -150,37 +180,73 @@ func envName(flagName string) string {
 
 // applyEnv seeds every flag from its environment variable. It runs before
 // Parse, so a flag given on the command line still takes precedence.
-func applyEnv(fs *flag.FlagSet, lookupEnv func(string) (string, bool)) error {
-	var bad []string
+//
+// A variable that is set but empty counts as a value, because some settings are
+// only meaningful when blank — SHORTLINK_NETBIRD_ADMIN_GROUP= is how an operator
+// says "no admin group", and skipping empties would silently leave the default
+// group in place. A variable that is unset leaves the flag default alone.
+//
+// Unusable values are returned keyed by flag name rather than raised here, so
+// the caller can decide whether the command line already overrode them.
+func applyEnv(fs *flag.FlagSet, lookupEnv func(string) (string, bool)) map[string]error {
+	bad := make(map[string]error)
 	fs.VisitAll(func(f *flag.Flag) {
-		name := envName(f.Name)
-		val, ok := lookupEnv(name)
-		if !ok || val == "" {
+		val, ok := lookupEnv(envName(f.Name))
+		if !ok {
 			return
 		}
 		// f.Value.Set rather than fs.Set: the latter marks the flag as
 		// explicitly set, which makes -h print its default twice.
 		if err := f.Value.Set(val); err != nil {
-			bad = append(bad, fmt.Sprintf("%s=%q is not a valid -%s value: %v", name, val, f.Name, err))
+			bad[f.Name] = fmt.Errorf("%s=%q is not a valid -%s value: %w", envName(f.Name), val, f.Name, err)
 		}
 	})
-	if len(bad) > 0 {
-		return errors.New(strings.Join(bad, "; "))
-	}
-	return nil
+	return bad
 }
 
-// versionString is the version to report: the linker-injected version when
-// present, plus the VCS revision from the embedded build info so a binary
-// built outside the release process is still traceable to a commit.
-func versionString() string {
-	v := version
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		if rev := vcsRevision(bi); rev != "" {
-			v += "+" + rev
+// firstEnvError returns the first unusable environment value whose flag was not
+// also given on the command line. Report order is sorted so the same bad
+// environment always produces the same message.
+func firstEnvError(bad map[string]error, fs *flag.FlagSet) error {
+	if len(bad) == 0 {
+		return nil
+	}
+	given := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
+	var names []string
+	for name := range bad {
+		if !given[name] {
+			names = append(names, name)
 		}
 	}
-	return v
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	msgs := make([]string, 0, len(names))
+	for _, name := range names {
+		msgs = append(msgs, bad[name].Error())
+	}
+	return errors.New(strings.Join(msgs, "; "))
+}
+
+// versionString is the version to report. A linker-stamped version is
+// authoritative and is printed as-is: `git describe --tags --always --long`
+// already carries the commit, so appending build info would only duplicate it.
+// Without a stamp, name the build and add the VCS revision from the embedded
+// build info, so a binary built outside the release process is still traceable
+// to a commit.
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if rev := vcsRevision(bi); rev != "" {
+			return devVersion + "+" + rev
+		}
+	}
+	return devVersion
 }
 
 func vcsRevision(bi *debug.BuildInfo) string {
@@ -263,9 +329,10 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
-	// A panic in a handler becomes a 500 instead of a dropped connection.
+	// A panic in a handler becomes a 500 instead of a dropped connection; the
+	// Handler does that itself, so it also gets an access-log line.
 	srv := &http.Server{
-		Handler:           web.LogPanics(h, logger),
+		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,

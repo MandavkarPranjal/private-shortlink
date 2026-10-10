@@ -73,9 +73,11 @@ func TestRequestLogging(t *testing.T) {
 		level  string
 		who    string
 	}{
-		{"/blog", 302, "DEBUG", "alice"},
+		// The redirect and the 404 resolve no identity — the first is the hot
+		// path, the second needs no owner — so they are attributed to the peer.
+		{"/blog", 302, "DEBUG", "192.0.2.1"},
 		{"/-/edit/blog", 403, "WARN", "bob"},
-		{"/missing", 404, "WARN", "alice"},
+		{"/missing", 404, "WARN", "192.0.2.1"},
 		{"/-/edit/blog", 200, "DEBUG", "alice"},
 	}
 	for i, w := range want {
@@ -151,8 +153,10 @@ func TestIdentityResolvedOncePerRequest(t *testing.T) {
 		return Identity{ID: "alice"}
 	}
 	h, st := newTestHandler(t, id, false)
+	// A route that consults the identity more than once: the home page renders
+	// the caller's own links and whether they may edit each one.
 	before := calls
-	do(t, h, "GET", "/-/api", nil, nil)
+	do(t, h, "GET", "/", nil, nil)
 	if got := calls - before; got != 1 {
 		t.Errorf("identity resolved %d times, want 1", got)
 	}
@@ -162,25 +166,113 @@ func TestIdentityResolvedOncePerRequest(t *testing.T) {
 }
 
 func TestIdentityFromContext(t *testing.T) {
-	ctx := context.Background()
-	if _, ok := IdentityFrom(ctx); ok {
+	if _, ok := IdentityFrom(context.Background()); ok {
 		t.Error("IdentityFrom on a bare context should report false")
 	}
-	id := Identity{ID: "alice", IsAdmin: true}
-	got, ok := IdentityFrom(withIdentity(ctx, id))
-	if !ok || got != id {
-		t.Errorf("IdentityFrom = %+v, %v; want %+v, true", got, ok, id)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	ctx := withIdentityState(context.Background(), req,
+		func(*http.Request) Identity { return Identity{ID: "alice", IsAdmin: true} })
+
+	// Reading the context must not be what triggers the lookup.
+	if _, ok := IdentityFrom(ctx); ok {
+		t.Error("IdentityFrom should not resolve on its own; only a handler may")
+	}
+
+	h, _ := newTestHandler(t, func(*http.Request) Identity {
+		return Identity{ID: "alice", IsAdmin: true}
+	}, false)
+	req = req.WithContext(ctx)
+	got := h.idOf(req)
+	if got.ID != "alice" || !got.IsAdmin {
+		t.Fatalf("idOf = %+v", got)
+	}
+	if cached, ok := IdentityFrom(ctx); !ok || cached != got {
+		t.Errorf("IdentityFrom = %+v, %v; want the cached %+v, true", cached, ok, got)
+	}
+	// And the cache is what a second reader sees, with no further lookup.
+	if again := h.idOf(req); again != got {
+		t.Errorf("second idOf = %+v, want %+v", again, got)
 	}
 }
 
-func TestLogPanics(t *testing.T) {
+// A redirect must not resolve an identity: that lookup is a WhoIs call to
+// tailscaled, and every click on a link is a redirect.
+func TestRedirectDoesNotResolveIdentity(t *testing.T) {
+	calls := 0
+	h, st := newTestHandler(t, func(*http.Request) Identity {
+		calls++
+		return Identity{ID: "alice"}
+	}, false)
+	if err := st.Save(context.Background(), &store.Link{Name: "x", URL: "http://example.com"}, false); err != nil {
+		t.Fatal(err)
+	}
+	before := calls
+
+	if rec := do(t, h, "GET", "/x", nil, nil); rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	if got := calls - before; got != 0 {
+		t.Errorf("redirect resolved the identity %d times, want 0", got)
+	}
+}
+
+// The access log still has to attribute the request, using the peer address
+// when no handler needed the identity.
+func TestRedirectLoggedWithPeer(t *testing.T) {
 	logger, sb := captureLogs(t, slog.LevelDebug)
-	h := LogPanics(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		panic("boom")
-	}), logger)
+	h, st := newTestHandler(t, func(*http.Request) Identity { return Identity{ID: "alice"} }, false)
+	h.log = logger
+	if err := st.Save(context.Background(), &store.Link{Name: "x", URL: "http://example.com"}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.RemoteAddr = "100.64.0.7:41234"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	recs := logRecords(t, sb)
+	if len(recs) != 1 {
+		t.Fatalf("got %d lines, want 1:\n%s", len(recs), sb.String())
+	}
+	if recs[0]["who"] != "100.64.0.7" {
+		t.Errorf("who = %v, want the peer address 100.64.0.7", recs[0]["who"])
+	}
+}
+
+// A handler that needs the identity gets the login name, not the peer address,
+// and still only one lookup for the whole request.
+func TestAccessLogUsesResolvedIdentity(t *testing.T) {
+	logger, sb := captureLogs(t, slog.LevelDebug)
+	calls := 0
+	h, _ := newTestHandler(t, func(*http.Request) Identity {
+		calls++
+		return Identity{ID: "alice"}
+	}, false)
+	h.log = logger
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "100.64.0.7:41234"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if calls != 1 {
+		t.Errorf("identity resolved %d times, want 1", calls)
+	}
+	recs := logRecords(t, sb)
+	if len(recs) != 1 {
+		t.Fatalf("got %d lines, want 1:\n%s", len(recs), sb.String())
+	}
+	if recs[0]["who"] != "alice" {
+		t.Errorf("who = %v, want alice", recs[0]["who"])
+	}
+}
+
+func TestServeRecovering(t *testing.T) {
+	logger, sb := captureLogs(t, slog.LevelDebug)
+	h := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("boom") })
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/panic", nil))
+	serveRecovering(h, rec, httptest.NewRequest("GET", "/panic", nil), logger)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
 	}
@@ -191,34 +283,74 @@ func TestLogPanics(t *testing.T) {
 	if recs[0]["level"] != "ERROR" || recs[0]["panic"] != "boom" {
 		t.Errorf("log = %v", recs[0])
 	}
-	if s, _ := recs[0]["stack"].(string); !strings.Contains(s, "TestLogPanics") {
+	if s, _ := recs[0]["stack"].(string); !strings.Contains(s, "TestServeRecovering") {
 		t.Errorf("stack does not mention the panicking test: %q", recs[0]["stack"])
 	}
 }
 
-func TestLogPanicsRethrowsAbortHandler(t *testing.T) {
+func TestServeRecoveringRethrowsAbortHandler(t *testing.T) {
 	logger, _ := captureLogs(t, slog.LevelDebug)
-	h := LogPanics(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	h := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic(http.ErrAbortHandler)
-	}), logger)
+	})
 
 	defer func() {
 		if r := recover(); r != http.ErrAbortHandler {
 			t.Errorf("recovered %v, want http.ErrAbortHandler", r)
 		}
 	}()
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+	serveRecovering(h, httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil), logger)
 	t.Error("expected the panic to propagate")
 }
 
-func TestLogPanicsPassesThrough(t *testing.T) {
+// A panicking request must still produce an access line, or the one request
+// most worth investigating is the only one missing from the log.
+func TestPanicStillLogsAccessLine(t *testing.T) {
 	logger, sb := captureLogs(t, slog.LevelDebug)
-	h := LogPanics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTeapot)
-	}), logger)
+	h, _ := newTestHandler(t, nil, false)
+	h.log = logger
+	// Dispatch that panics after committing a status, the case where the
+	// recovery cannot rewrite the response.
+	h.mux = http.NewServeMux()
+	h.mux.HandleFunc("/x", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		panic("boom")
+	})
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil))
+
+	recs := logRecords(t, sb)
+	var sawError, sawRequest bool
+	for _, rec := range recs {
+		if rec["msg"] == "panic serving request" {
+			sawError = true
+		}
+		if rec["msg"] == "request" && rec["status"] == float64(500) {
+			sawRequest = true
+		}
+	}
+	if !sawError {
+		t.Errorf("no panic line:\n%s", sb.String())
+	}
+	if !sawRequest {
+		t.Errorf("panicking request was not logged as a 500:\n%s", sb.String())
+	}
+	// The response kept the status the handler committed: net/http already sent
+	// it, so the error body must not be spliced onto it.
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want the committed 200", rec.Code)
+	}
+}
+
+func TestServeRecoveringPassesThrough(t *testing.T) {
+	logger, sb := captureLogs(t, slog.LevelDebug)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+
+	rec := httptest.NewRecorder()
+	serveRecovering(h, rec, httptest.NewRequest("GET", "/", nil), logger)
 	if rec.Code != http.StatusTeapot {
 		t.Errorf("status = %d, want 418", rec.Code)
 	}

@@ -20,26 +20,24 @@ EnvironmentFile=/etc/shortlink/shortlink.env
 StateDirectory=shortlink
 WorkingDirectory=/var/lib/shortlink
 
+# No -mode here on purpose: the mode belongs in the environment file, where
+# SHORTLINK_MODE is easy to change without editing this unit. A flag on the
+# command line wins over the environment, so adding one here would silently
+# override SHORTLINK_MODE and make it look broken.
 ExecStart=/usr/local/bin/shortlink \
-  -mode tailnet \
   -db /var/lib/shortlink/shortlink.db \
   -state-dir /var/lib/shortlink/tsnet \
   -key-file /var/lib/shortlink/shortlink-tailcat.key
 
-# tsnet and netbird mode need to create a TUN device (tailnet mode embeds a
-# node) or bind an existing WireGuard interface. Both require capabilities that
-# the default bounding set does not grant, and the database must be writable.
-# Drop every other capability, then re-add only what the chosen mode needs:
+# Every other capability is dropped and only CAP_NET_BIND_SERVICE is re-added:
 #
-#   tailcat / local  no capabilities needed at all
-#   tailnet          AmbientCapabilities=CAP_NET_ADMIN
-#                    (tsnet creates /dev/net/tun)
-#   netbird          AmbientCapabilities=CAP_NET_BIND_SERVICE
-#                    (binds port 80 on the mesh interface; add CAP_NET_ADMIN
-#                    only if netbird mode also needs to manage the interface)
+#   tailcat / tailnet   none needed. tsnet embeds a userspace network stack; it
+#                       creates no TUN device and needs no elevated rights.
+#   netbird / local     CAP_NET_BIND_SERVICE only if binding a port below 1024.
+#                       netbird mode binds a port on the host's existing
+#                       WireGuard interface, it does not create one.
 #
-# With a port below 1024, also grant CAP_NET_BIND_SERVICE. Override the list per
-# instance with `systemctl edit shortlink`.
+# Override the list per instance with `systemctl edit shortlink`.
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
@@ -64,13 +62,12 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
-# PrivateDevices must stay off in tailnet mode: it replaces /dev with a minimal
-# one that has no /dev/net/tun, and tsnet opens the TUN device to build the
-# embedded node. DevicePolicy is closed instead, so the service still reaches
-# only the devices it needs.
-PrivateDevices=false
+# No mode here needs a device. tsnet's network stack is userspace (gVisor), so
+# tailnet mode opens no TUN; netbird mode binds a port on the host's existing
+# WireGuard interface and does not manage the device. DevicePolicy=closed
+# therefore costs nothing and still keeps the process away from /dev/kvm,
+# /dev/mem and friends.
 DevicePolicy=closed
-DeviceAllow=/dev/net/tun rw
 DeviceAllow=/dev/null rw
 DeviceAllow=/dev/zero rw
 DeviceAllow=/dev/urandom r
