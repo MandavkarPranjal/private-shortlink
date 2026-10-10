@@ -319,11 +319,12 @@ docker run -d --name shortlink \
   shortlink:local
 ```
 
-The default command is local mode on port 8080. Overriding the command replaces
-it wholesale, so a mesh-mode run has to name the paths it wants to keep
-persistent — the working directory is `/data`, so even the relative defaults land
-in the volume. Neither mesh mode needs a TUN device: tsnet's stack is
-userspace, and netbird binds a port on the host's existing WireGuard interface.
+The default command is local mode on port 8080. Overriding it replaces the CMD
+wholesale, so a mesh-mode run has to repeat the paths it wants persistent —
+`-db` and `-key-file` both name files inside the volumes, and neither is a
+default that points there. Neither mesh mode needs a TUN device: tsnet's stack
+is userspace, tailcat is WireGuard plus DERP with no control plane, and netbird
+binds a port on the host's existing WireGuard interface.
 
 ```sh
 # tailnet: the embedded node serves on the tailnet, so it needs no port
@@ -331,8 +332,14 @@ userspace, and netbird binds a port on the host's existing WireGuard interface.
 docker run -d --name shortlink \
   -e TS_AUTHKEY=tskey-auth-... \
   -v shortlink-data:/data -v shortlink-config:/config \
-  shortlink:local -mode tailnet -db /data/shortlink.db \
-  -state-dir /config/shortlink-tsnet
+  shortlink:local -mode tailnet \
+  -db /data/shortlink.db -state-dir /config/shortlink-tsnet
+
+# tailcat: a tc… address, reached through the tailcat CLI on the client
+docker run -d --name shortlink \
+  -v shortlink-data:/data -v shortlink-config:/config \
+  shortlink:local -mode tailcat \
+  -db /data/shortlink.db -key-file /config/shortlink-tailcat.key
 
 # netbird: binds port 80 on the host's mesh interface, which needs the host
 # network namespace and NET_BIND_SERVICE
@@ -342,6 +349,11 @@ docker run -d --name shortlink \
   -v shortlink-data:/data \
   shortlink:local -mode netbird -db /data/shortlink.db
 ```
+
+Every flag that names a file needs an explicit path here, because the volume
+paths are not the binary's defaults. `-key-file` matters as much as `-db`: drop
+it and the container writes its node key to a fresh file on every start, so the
+tc… address changes and every address you handed out stops resolving.
 
 `mise run docker:build` stamps the version and commit from git. A bare
 `docker build` cannot: `.git` is excluded from the build context on purpose, so
