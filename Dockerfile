@@ -46,10 +46,10 @@ COPY --from=build --chown=65532:65532 /config /config
 # container replacements.
 VOLUME ["/data", "/config"]
 
-# Working directory is a volume, so a relative -db or -key-file default (the
-# binary falls back to ./shortlink.db and ./shortlink-tailcat.key) still lands in
-# persistent storage. Without this, an overridden CMD that leaves out -db would
-# try to create the database in /, which uid 65532 cannot write to.
+# The working directory is a volume, so the relative -db default (the binary
+# falls back to ./shortlink.db) still lands in persistent storage. Without this,
+# an overridden CMD that leaves out -db would try to create the database in /,
+# which uid 65532 cannot write to, and the process would exit at startup.
 WORKDIR /data
 
 EXPOSE 8080
@@ -66,4 +66,4 @@ USER nonroot:nonroot
 # capabilities. netbird mode binds a port on the host's mesh interface, which
 # needs host networking and, for port 80, --cap-add NET_BIND_SERVICE.
 ENTRYPOINT ["/usr/local/bin/shortlink"]
-CMD ["-mode", "local", "-listen", ":8080", "-db", "/data/shortlink.db", "-state-dir", "/config/shortlink-tsnet", "-key-file", "/data/shortlink-tailcat.key"]
+CMD ["-mode", "local", "-listen", ":8080", "-db", "/data/shortlink.db", "-state-dir", "/config/shortlink-tsnet", "-key-file", "/config/shortlink-tailcat.key"]
